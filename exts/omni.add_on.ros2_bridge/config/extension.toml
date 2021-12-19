@@ -1,0 +1,43 @@
+[core]
+reloadable = true
+order = 0
+
+[package]
+version = "0.0.1"
+category = "Simulation"
+title = "ROS2 Bridge (add-on)"
+description = "ROS2 interfaces used for add-ons"
+authors = ["Toni-SM"]
+repository = ""
+keywords = ["ROS2"]
+changelog = "docs/CHANGELOG.md"
+readme = "docs/README.md"
+preview_image = "data/preview.png"
+icon = "data/icon.png"
+
+[dependencies]
+"omni.kit.uiapp" = {}
+"omni.isaac.ros2_bridge" = {}
+"omni.usd.schema.add_on" = {}
+"omni.add_on.ros_bridge_ui" = {}
+"omni.kit.pip_archive" = {} # pulls in numpy and opencv
+
+[[python.module]]
+name = "omni.add_on.ros2_bridge"
+
+[[python.module]]
+name = "omni.add_on.ros2_bridge.tests"
+
+[settings]
+exts."omni.add_on.ros2_bridge".nodeName = "OmniAddOnRos2Bridge"
+
+[[native.library]]
+path = "bin/libadd_on_msgs__python.so"
+[[native.library]]
+path = "bin/libadd_on_msgs__rosidl_generator_c.so"
+[[native.library]]
+path = "bin/libadd_on_msgs__rosidl_typesupport_c.so"
+[[native.library]]
+path = "bin/libadd_on_msgs__rosidl_typesupport_fastrtps_c.so"
+[[native.library]]
+path = "bin/libadd_on_msgs__rosidl_typesupport_introspection_c.so"
