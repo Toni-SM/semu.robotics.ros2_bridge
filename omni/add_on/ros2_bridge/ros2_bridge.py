@@ -338,7 +338,7 @@ class RosAttribute(RosController):
 
                         response.success = True
                     except Exception as e:
-                        print("[ERROR] srv {} request for {} ({}: {}): {}".format(self._srv_setter.srv_name, request.path, request.attribute, value, e))
+                        print("[ERROR] srv {} request for {} ({}: {}): {}".format(self._srv_setter.srv_name, request.path, request.attribute, request.value, e))
                         response.success = False
                         response.message = str(e)
                 else:
