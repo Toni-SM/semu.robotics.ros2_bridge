@@ -2,8 +2,6 @@ import os
 import sys
 import carb
 import omni.ext
-
-
 try:
     from .. import _ros2_bridge
 except:
@@ -14,6 +12,8 @@ except:
 class Extension(omni.ext.IExt):
     def on_startup(self, ext_id):
         self._ros2bridge = None
+        self._packages_path = None
+
         ext_manager = omni.kit.app.get_app().get_extension_manager()
         if ext_manager.is_extension_enabled("omni.isaac.ros_bridge"):
             carb.log_error("ROS 2 Bridge (add-on) extension cannot be enabled if ROS Bridge is enabled")
@@ -30,9 +30,10 @@ class Extension(omni.ext.IExt):
         sys.path.append(self._packages_path)
 
         self._ros2bridge = _ros2_bridge.acquire_ros2_bridge_interface()
-        
+
     def on_shutdown(self):
         if self._ros2bridge is not None:
             _ros2_bridge.release_ros2_bridge_interface(self._ros2bridge)
-        if self._packages_path in sys.path:
+            self._ros2bridge = None
+        if self._packages_path is not None and self._packages_path in sys.path:
             sys.path.remove(self._packages_path)

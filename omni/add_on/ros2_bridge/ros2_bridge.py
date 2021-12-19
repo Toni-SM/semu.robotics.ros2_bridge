@@ -24,11 +24,10 @@ from omni.syntheticdata import sensors
 
 import rclpy
 from rclpy.node import Node
-# import rosgraph
-# import sensor_msgs.msg
 
 import omni.add_on.RosBridgeSchema as ROSSchema
 
+# services
 GetPrims = None
 GetPrimAttributes = None
 GetPrimAttribute = None
@@ -48,15 +47,20 @@ def acquire_ros2_bridge_interface(plugin_name=None, library_path=None):
     GetPrimAttribute = get_prim_attribute_srv
     SetPrimAttribute = set_prim_attribute_srv
 
-    return Ros2Bridge()
+    rclpy.init()
+    bridge = Ros2Bridge()
+    threading.Thread(target=rclpy.spin, args=(bridge,)).start()
+    return bridge
 
 def release_ros2_bridge_interface(bridge):
     bridge.shutdown()
 
 
-class Ros2Bridge():
+class Ros2Bridge(Node):
     def __init__(self):
-        self._node = None
+        node_name = carb.settings.get_settings().get("/exts/omni.add_on.ros2_bridge/nodeName")
+        super().__init__(node_name)
+
         self._components = []
 
         # omni objects
@@ -69,27 +73,12 @@ class Ros2Bridge():
         self._event_timeline = self._timeline.get_timeline_event_stream().create_subscription_to_pop(self._on_timeline_event)
         self._stage_event = self._usd_context.get_stage_event_stream().create_subscription_to_pop(self._on_stage_event)
 
-        # ROS node
-        print(self._ros_node())
-
     def shutdown(self):
         self._event_editor_step = None
         self._event_timeline = None
         self._stage_event = None
         self._stop_components()
         rclpy.shutdown()
-
-    def _ros_node(self):
-        node_name = carb.settings.get_settings().get("/exts/omni.add_on.ros2_bridge/nodeName")
-        # start ROS node
-        try:
-            rclpy.init()
-            self._node = Node(node_name)
-            print("[INFO] {} node started".format(node_name))
-        except Exception as e:
-            print("[ERROR] {}:".format(node_name), e)
-            return False
-        return True
 
     def _get_ros_bridge_schemas(self):
         schemas = []
@@ -113,9 +102,9 @@ class Ros2Bridge():
         self._skip_step = True
         for schema in self._get_ros_bridge_schemas():
             if schema.__class__.__name__ == "RosCompressedCamera":
-                self._components.append(RosCompressedCamera(self._node, self._viewport_interface, self._usd_context, schema))
+                self._components.append(RosCompressedCamera(self, self._viewport_interface, self._usd_context, schema))
             elif schema.__class__.__name__ == "RosAttribute":
-                self._components.append(RosAttribute(self._node, self._usd_context, schema))
+                self._components.append(RosAttribute(self, self._usd_context, schema))
 
     def _on_editor_step_event(self, event):
         if self._timeline.is_playing():
@@ -444,9 +433,6 @@ class RosAttribute(RosController):
         return response
     
     def _process_prims_request(self, request, response):
-        print("[DEBUG] _process_prims_request")
-        print("  |-- request:", request)
-        print("  |-- response:", response)
         response.success = False
         if self._schema.GetEnabledAttr().Get():
             stage = self._usd_context.get_stage()
@@ -486,19 +472,19 @@ class RosAttribute(RosController):
     def stop(self):
         if self._srv_prims is not None:
             print("[INFO] RosAttribute: unregister srv:", self._srv_prims.srv_name)
-            self._srv_prims.destroy()
+            self._node.destroy_service(self._srv_prims)
             self._srv_prims = None
         if self._srv_getter is not None:
             print("[INFO] RosAttribute: unregister srv:", self._srv_getter.srv_name)
-            self._srv_getter.destroy()
+            self._node.destroy_service(self._srv_getter)
             self._srv_getter = None
         if self._srv_attributes is not None:
             print("[INFO] RosAttribute: unregister srv:", self._srv_attributes.srv_name)
-            self._srv_attributes.destroy()
+            self._node.destroy_service(self._srv_attributes)
             self._srv_attributes = None
         if self._srv_setter is not None:
             print("[INFO] RosAttribute: unregister srv:", self._srv_setter.srv_name)
-            self._srv_setter.destroy()
+            self._node.destroy_service(self._srv_setter)
             self._srv_setter = None
         super(RosAttribute, self).stop()
 
