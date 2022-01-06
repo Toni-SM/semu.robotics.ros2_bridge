@@ -24,7 +24,7 @@ from omni.syntheticdata import sensors
 
 import rclpy
 from rclpy.node import Node
-from rclpy.action import ActionServer
+from rclpy.action import ActionServer, CancelResponse, GoalResponse
 
 
 import omni.add_on.RosBridgeSchema as ROSSchema
@@ -45,7 +45,9 @@ def acquire_ros2_bridge_interface(plugin_name=None, library_path=None):
     from add_on_msgs.srv import GetPrimAttribute as get_prim_attribute_srv
     from add_on_msgs.srv import SetPrimAttribute as set_prim_attribute_srv
     from control_msgs.action import FollowJointTrajectory as follow_joint_trajectory
- 
+    import control_msgs
+
+    print(control_msgs.__file__)
     GetPrims = get_prims_srv
     GetPrimAttributes = get_prim_attributes_srv
     GetPrimAttribute = get_prim_attribute_srv
@@ -510,9 +512,6 @@ class RosControlFollowJointTrajectory(RosController):
         self._action_server = None
         self._node = node
 
-    async def _set_attribute(self, attribute, attribute_value):
-        attribute.Set(attribute_value)
-
     def start(self):
         self.started = True
         print("[INFO] RosControlFollowJointTrajectory: starting", self._schema.__class__.__name__)
@@ -524,16 +523,25 @@ class RosControlFollowJointTrajectory(RosController):
             self._node,
             FollowJointTrajectory,
             controller_name + action_namespace,
-            self.execute_callback)        
+            execute_callback=self.execute_callback,
+            goal_callback=self.__on_goal,
+)        
+
+    def __on_goal(self, goal_handle):
+        return GoalResponse.ACCEPT
 
     def execute_callback(self, goal_handle):
         self.get_logger().info('Executing goal...')
+        goal_handle.succeed()
         result = FollowJointTrajectory.Result()
+        result.error_code = result.SUCCESSFUL
         return result
 
 
 
     def stop(self):
+        if self._action_server is not None:
+            self._action_server.destroy()
         super(RosControlFollowJointTrajectory, self).stop()
 
     def step(self, dt):
