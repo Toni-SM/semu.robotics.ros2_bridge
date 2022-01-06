@@ -24,29 +24,33 @@ from omni.syntheticdata import sensors
 
 import rclpy
 from rclpy.node import Node
+from rclpy.action import ActionServer
+
 
 import omni.add_on.RosBridgeSchema as ROSSchema
+import omni.add_on.RosControlBridgeSchema as ROSControlSchema
 
 # services
 GetPrims = None
 GetPrimAttributes = None
 GetPrimAttribute = None
 SetPrimAttribute = None
-
+FollowJointTrajectory = None
 
 def acquire_ros2_bridge_interface(plugin_name=None, library_path=None):
-    global GetPrims, GetPrimAttributes, GetPrimAttribute, SetPrimAttribute
+    global GetPrims, GetPrimAttributes, GetPrimAttribute, SetPrimAttribute, FollowJointTrajectory
     
     from add_on_msgs.srv import GetPrims as get_prims_srv
     from add_on_msgs.srv import GetPrimAttributes as get_prim_attributes_srv
     from add_on_msgs.srv import GetPrimAttribute as get_prim_attribute_srv
     from add_on_msgs.srv import SetPrimAttribute as set_prim_attribute_srv
-
+    from control_msgs.action import FollowJointTrajectory as follow_joint_trajectory
+ 
     GetPrims = get_prims_srv
     GetPrimAttributes = get_prim_attributes_srv
     GetPrimAttribute = get_prim_attribute_srv
     SetPrimAttribute = set_prim_attribute_srv
-
+    FollowJointTrajectory = follow_joint_trajectory
     rclpy.init()
     bridge = Ros2Bridge()
     threading.Thread(target=rclpy.spin, args=(bridge,)).start()
@@ -88,6 +92,8 @@ class Ros2Bridge(Node):
                 schemas.append(ROSSchema.RosCompressedCamera(prim))
             elif prim.GetTypeName() == "RosAttribute":
                 schemas.append(ROSSchema.RosAttribute(prim))
+            elif prim.GetTypeName() == "RosControlFollowJointTrajectory":
+                schemas.append(ROSControlSchema.RosControlFollowJointTrajectory(prim))
         return schemas
 
     def _stop_components(self):
@@ -101,10 +107,14 @@ class Ros2Bridge(Node):
         self._components = []
         self._skip_step = True
         for schema in self._get_ros_bridge_schemas():
+            print(schema.__class__.__name__)
             if schema.__class__.__name__ == "RosCompressedCamera":
                 self._components.append(RosCompressedCamera(self, self._viewport_interface, self._usd_context, schema))
             elif schema.__class__.__name__ == "RosAttribute":
                 self._components.append(RosAttribute(self, self._usd_context, schema))
+            elif schema.__class__.__name__ == "RosControlFollowJointTrajectory":
+                self._components.append(RosControlFollowJointTrajectory(self, self._usd_context, schema))
+                
 
     def _on_editor_step_event(self, event):
         if self._timeline.is_playing():
@@ -490,5 +500,41 @@ class RosAttribute(RosController):
 
     def step(self, dt):
         pass
+
+
+
+class RosControlFollowJointTrajectory(RosController):
+    def __init__(self, node, usd_context, schema):
+        super(RosControlFollowJointTrajectory, self).__init__(node, usd_context, schema)
         
-            
+        self._action_server = None
+        self._node = node
+
+    async def _set_attribute(self, attribute, attribute_value):
+        attribute.Set(attribute_value)
+
+    def start(self):
+        self.started = True
+        print("[INFO] RosControlFollowJointTrajectory: starting", self._schema.__class__.__name__)
+
+        action_namespace = self._schema.GetActionNamespaceAttr().Get()
+        controller_name = self._schema.GetControllerNameAttr().Get()
+        print("[INFO] RosControlFollowJointTrajectory: register action", controller_name + action_namespace)
+        self._action_server = ActionServer(
+            self._node,
+            FollowJointTrajectory,
+            controller_name + action_namespace,
+            self.execute_callback)        
+
+    def execute_callback(self, goal_handle):
+        self.get_logger().info('Executing goal...')
+        result = FollowJointTrajectory.Result()
+        return result
+
+
+
+    def stop(self):
+        super(RosControlFollowJointTrajectory, self).stop()
+
+    def step(self, dt):
+        pass

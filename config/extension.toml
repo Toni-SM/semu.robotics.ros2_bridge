@@ -41,3 +41,13 @@ path = "bin/libadd_on_msgs__rosidl_typesupport_c.so"
 path = "bin/libadd_on_msgs__rosidl_typesupport_fastrtps_c.so"
 [[native.library]]
 path = "bin/libadd_on_msgs__rosidl_typesupport_introspection_c.so"
+[[native.library]]
+path = "bin/libcontrol_msgs__rosidl_generator_c.so"
+[[native.library]]
+path = "bin/libcontrol_msgs__python.so"
+[[native.library]]
+path = "bin/libcontrol_msgs__rosidl_typesupport_c.so"
+[[native.library]]
+path = "bin/libcontrol_msgs__rosidl_typesupport_fastrtps_c.so"
+[[native.library]]
+path = "bin/libcontrol_msgs__rosidl_typesupport_introspection_c.so"
