@@ -52,7 +52,6 @@ def acquire_ros2_bridge_interface(plugin_name=None, library_path=None):
     from control_msgs.action import FollowJointTrajectory as follow_joint_trajectory
     import control_msgs
 
-    print(control_msgs.__file__)
     GetPrims = get_prims_srv
     GetPrimAttributes = get_prim_attributes_srv
     GetPrimAttribute = get_prim_attribute_srv
@@ -114,7 +113,6 @@ class Ros2Bridge(Node):
         self._components = []
         self._skip_step = True
         for schema in self._get_ros_bridge_schemas():
-            print(schema.__class__.__name__)
             if schema.__class__.__name__ == "RosCompressedCamera":
                 self._components.append(RosCompressedCamera(self, self._viewport_interface, self._usd_context, schema))
             elif schema.__class__.__name__ == "RosAttribute":
@@ -543,11 +541,14 @@ class RosControlFollowJointTrajectory(RosController):
         self._usd_context = usd_context
         # Config
         # TODO: Maybe add this as a parameter in the GUI
-        self._default_tolerance = 0.05
         self._joints = {}
-        self._lower_limits = {}
-        self._upper_limits = {}
-        self._has_limits = {}
+       
+        self.__default_tolerance = 0.05
+        self.__current_point_index = 1
+        self.__start_time = None
+        self.__goal = None
+        self.__mode = None
+        self.__tolerances = {}
 
     def start(self):
         self.started = True
@@ -587,20 +588,22 @@ class RosControlFollowJointTrajectory(RosController):
     def add_joints(self, ar):
         num_dofs = self._dc.get_articulation_dof_count(ar)
         dof_props = self._dc.get_articulation_dof_properties(ar)
-
+        if dof_props is None:
+            return
         has_limits = dof_props["hasLimits"]
         upper_limits = dof_props["upper"]
         lower_limits = dof_props["lower"]
 
         for idx, el in enumerate(range(num_dofs)):
             dof_ptr = self._dc.get_articulation_dof(ar, el)
-            name = self._dc.get_dof_name(dof_ptr)
-            if name in self._joints:
-                continue
-            self._joints[name] = dof_ptr
-            self._lower_limits[name] = lower_limits[idx]
-            self._upper_limits[name] = upper_limits[idx]
-            self._has_limits[name] = has_limits[idx]
+            if dof_ptr != _dynamic_control.DofType.DOF_NONE:
+                name = self._dc.get_dof_name(dof_ptr)
+                if name in self._joints:
+                    continue    
+                self._joints[name] = {"dof": self._dc.find_articulation_dof(ar, name), "idx": idx, "ar": ar, 
+                                      "lower": lower_limits[idx], "upper": upper_limits[idx], 
+                                      "hasLimits": has_limits[idx]}
+
 
 
 
@@ -608,9 +611,9 @@ class RosControlFollowJointTrajectory(RosController):
         """Handle a new goal trajectory command."""
         # Reject if joints don't match
         for name in goal_handle.trajectory.joint_names:
-            if name not in self.__joints.keys():
+            if name not in self._joints.keys():
                 joint_names = ', '.join(goal_handle.trajectory.joint_names)
-                print(f"[ERROR] RosControlFollowJointTrajectory: Received a goal with incorrect joint names: ({joint_names})")
+                print(f"[ERROR] RosControlFollowJointTrajectory: Received a goal with incorrect joint names: ({joint_names}, {self._joints.keys()})")
                 return GoalResponse.REJECT
 
         # Reject if infinity or NaN
@@ -629,7 +632,7 @@ class RosControlFollowJointTrajectory(RosController):
         # Store goal data
         self.__goal = goal_handle
         self.__current_point_index = 1
-        self.__start_time = self.get_clock().now().nanoseconds / 1e9
+        self.__start_time = self._node.get_clock().now().nanoseconds / 1e9
 
         for tolerance in self.__goal.goal_tolerance:
             self.__tolerances[tolerance.name] = tolerance.position
@@ -687,7 +690,7 @@ class RosControlFollowJointTrajectory(RosController):
         return False
 
     def __regulate_time_mode(self):
-        now = self.get_clock().now().nanoseconds / 1e9
+        now = self._node.get_clock().now().nanoseconds / 1e9
         prev_point = self.__goal.trajectory.points[self.__current_point_index - 1]
         curr_point = self.__goal.trajectory.points[self.__current_point_index]
         time_passed = now - self.__start_time
@@ -708,17 +711,23 @@ class RosControlFollowJointTrajectory(RosController):
         return False
 
     def __set_joint_position(self, name, target_position):
-        if self._has_limits[name]:
-            target_position = min(max(target_position, self._lower_limits[name]), self._upper_limits[name])
+        if self._joints[name]["hasLimits"]:
+            target_position = min(max(target_position, self._joints[name]["lower"]), self._joints[name]["upper"])
 
-        dof_ptr = self.joints[name]
-        self.__dc.wake_up_articulation(dof_ptr)
-        self.__dc.set_dof_position_target(dof_ptr, target_position)
+        
+        # dof_ptr = self._joints[name]["dof"]
+        ar = self._joints[name]["ar"]
+        self._dc.wake_up_articulation(ar)
+        dof_positions = self._dc.get_articulation_dof_states(ar, _dynamic_control.STATE_ALL)["pos"]
+        dof_positions[self._joints[name]["idx"]] = target_position
+        self._dc.set_articulation_dof_position_targets(ar, dof_positions)
+        # print(dof_positions)
+        # self._dc.set_dof_position_target(dof_ptr, target_position)
 
     def __get_joint_position(self, name):
 
         # Get state for a specific degree of freedom
-        dof_state = self.__dc.get_dof_state(self.joints[name])
+        dof_state = self._dc.get_dof_state(self._joints[name]["dof"], _dynamic_control.STATE_POS)
         return dof_state.pos
 
 
@@ -736,7 +745,7 @@ class RosControlFollowJointTrajectory(RosController):
 
             # Finalize
             if done:
-                print("[INFO] RosControlFollowJointTrajectory: Goal Accepted")
+                print("[INFO] RosControlFollowJointTrajectory: Goal Succeeded")
                 self.__goal = None
                 goal_handle.succeed()
                 result = FollowJointTrajectory.Result()
@@ -744,13 +753,12 @@ class RosControlFollowJointTrajectory(RosController):
                 return result
 
             # Publish state
-            time_passed = self.get_clock().now().nanoseconds / 1e9 - self.__start_time
+            time_passed = self._node.get_clock().now().nanoseconds / 1e9 - self.__start_time
             feedback_message.actual.positions = [self.__get_joint_position(name)
                                                  for name in self.__goal.trajectory.joint_names]
             feedback_message.actual.time_from_start = Duration(seconds=time_passed).to_msg()
             goal_handle.publish_feedback(feedback_message)
 
-            #TODO: Get physics rate
             time.sleep(0.05)
 
         result = FollowJointTrajectory.Result()
