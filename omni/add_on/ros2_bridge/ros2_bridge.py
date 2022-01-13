@@ -8,6 +8,7 @@ import carb
 import omni.kit
 from pxr import Usd, Gf
 from omni.syntheticdata import sensors
+from omni.isaac.dynamic_control import _dynamic_control
 
 # try:
 #     import numpy as np
@@ -63,19 +64,22 @@ class Ros2Bridge(Node):
 
         self._components = []
 
-        # omni objects
+        # omni objects and interfaces
         self._usd_context = omni.usd.get_context()
         self._timeline = omni.timeline.get_timeline_interface()
         self._viewport_interface = omni.kit.viewport.get_viewport_interface()
+        self._physx_interface = omni.physx.acquire_physx_interface()
+        self._dci = _dynamic_control.acquire_dynamic_control_interface()
         
         # events
-        self._event_editor_step = (omni.kit.app.get_app().get_update_event_stream().create_subscription_to_pop(self._on_editor_step_event))
-        self._event_timeline = self._timeline.get_timeline_event_stream().create_subscription_to_pop(self._on_timeline_event)
+        self._update_event = omni.kit.app.get_app().get_update_event_stream().create_subscription_to_pop(self._on_update_event)
+        self._timeline_event = self._timeline.get_timeline_event_stream().create_subscription_to_pop(self._on_timeline_event)
         self._stage_event = self._usd_context.get_stage_event_stream().create_subscription_to_pop(self._on_stage_event)
+        self._physx_event = self._physx_interface.subscribe_physics_step_events(self._on_physics_event)
 
     def shutdown(self):
-        self._event_editor_step = None
-        self._event_timeline = None
+        self._update_event = None
+        self._timeline_event = None
         self._stage_event = None
         self._stop_components()
         rclpy.shutdown()
@@ -104,9 +108,9 @@ class Ros2Bridge(Node):
             if schema.__class__.__name__ == "RosCompressedCamera":
                 self._components.append(RosCompressedCamera(self, self._viewport_interface, self._usd_context, schema))
             elif schema.__class__.__name__ == "RosAttribute":
-                self._components.append(RosAttribute(self, self._usd_context, schema))
+                self._components.append(RosAttribute(self, self._usd_context, schema, self._dci))
 
-    def _on_editor_step_event(self, event):
+    def _on_update_event(self, event):
         if self._timeline.is_playing():
             for component in self._components:
                 if self._skip_step:
@@ -117,7 +121,7 @@ class Ros2Bridge(Node):
                     component.start()
                     return
                 # step
-                component.step(event.payload["dt"])
+                component.update_step(event.payload["dt"])
     
     def _on_timeline_event(self, event):
         # reload components
@@ -132,6 +136,10 @@ class Ros2Bridge(Node):
     def _on_stage_event(self, event):
         if event.type == int(omni.usd.StageEventType.OPENED):
             pass
+
+    def _on_physics_event(self, step):
+        for component in self._components:
+            component.physics_step(step)
 
 
 class RosController():
@@ -149,7 +157,10 @@ class RosController():
         print("[INFO] RosController: stopping", self._schema.__class__.__name__)
         self.started = False
 
-    def step(self, dt):
+    def update_step(self, dt):
+        raise NotImplementedError
+
+    def physics_step(self, step):
         raise NotImplementedError
 
 
@@ -265,16 +276,27 @@ class RosCompressedCamera(RosController):
             
 
 class RosAttribute(RosController):
-    def __init__(self, node, usd_context, schema):
+    def __init__(self, node, usd_context, schema, dci):
         super(RosAttribute, self).__init__(node, usd_context, schema)
+
+        self._dci = dci
 
         self._srv_prims = None
         self._srv_attributes = None
         self._srv_getter = None
         self._srv_setter = None
 
+        self._value = None
+        self._attribute = None
+
+        self._event = threading.Event()
+        self._event.set()
+
+        self.__set_attribute_using_asyncio = False
+        print("[INFO] RosAttribute [asyncio: {}]".format(self.__set_attribute_using_asyncio))
+
     async def _set_attribute(self, attribute, attribute_value):
-        attribute.Set(attribute_value)
+        ret = attribute.Set(attribute_value)
 
     def _process_setter_request(self, request, response):
         response.success = False
@@ -328,15 +350,26 @@ class RosAttribute(RosController):
                         
                         # set attribute
                         if attribute_value is not None:
-                            try:
-                                loop = asyncio.get_event_loop()
-                            except:
-                                loop = asyncio.new_event_loop()
-                            asyncio.set_event_loop(loop)
-                            future = asyncio.ensure_future(self._set_attribute(attribute, attribute_value))
-                            loop.run_until_complete(future)
+                            # set attribute usign asyncio
+                            if self.__set_attribute_using_asyncio:
+                                try:
+                                    loop = asyncio.get_event_loop()
+                                except:
+                                    loop = asyncio.new_event_loop()
+                                asyncio.set_event_loop(loop)
+                                future = asyncio.ensure_future(self._set_attribute(attribute, attribute_value))
+                                loop.run_until_complete(future)
+                                response.success = True
+                            # set attribute in the physics event
+                            else:
+                                self._attribute = attribute
+                                self._value = attribute_value
 
-                        response.success = True
+                                self._event.clear()
+                                response.success = self._event.wait(2.5)
+                                if not response.success:
+                                    response.message = "The timeout (2.5s) for setting the attribute value has been reached"
+                                
                     except Exception as e:
                         print("[ERROR] srv {} request for {} ({}: {}): {}".format(self._srv_setter.srv_name, request.path, request.attribute, request.value, e))
                         response.success = False
@@ -488,7 +521,15 @@ class RosAttribute(RosController):
             self._srv_setter = None
         super(RosAttribute, self).stop()
 
-    def step(self, dt):
+    def update_step(self, dt):
         pass
+
+    def physics_step(self, step):
+        if not self.__set_attribute_using_asyncio:
+            return
+        if self._dci.is_simulating():
+            if not self._event.is_set():
+                if self._attribute is not None:
+                    ret = self._attribute.Set(self._value)
+                self._event.set()
         
-            
