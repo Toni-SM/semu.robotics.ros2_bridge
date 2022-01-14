@@ -31,6 +31,7 @@ from trajectory_msgs.msg import JointTrajectoryPoint
 from rclpy.duration import Duration
 from rclpy.action import ActionServer, CancelResponse, GoalResponse
 
+from omni.isaac.core.utils.stage import get_stage_units
 
 import omni.add_on.RosBridgeSchema as ROSSchema
 import omni.add_on.RosControlBridgeSchema as ROSControlSchema
@@ -59,7 +60,9 @@ def acquire_ros2_bridge_interface(plugin_name=None, library_path=None):
     FollowJointTrajectory = follow_joint_trajectory
     rclpy.init()
     bridge = Ros2Bridge()
-    threading.Thread(target=rclpy.spin, args=(bridge,)).start()
+    executor = rclpy.executors.MultiThreadedExecutor()
+    executor.add_node(bridge)
+    threading.Thread(target=executor.spin, ).start()
     return bridge
 
 def release_ros2_bridge_interface(bridge):
@@ -548,11 +551,9 @@ class RosControlFollowJointTrajectory(RosController):
         self.__current_point_index = 1
         self.__start_time = None
         self.__goal = None
-        self.__mode = None
         self.__tolerances = {}
         
         self._dt = 0.05
-        self._success = False
 
     def start(self):
         self.started = True
@@ -566,7 +567,6 @@ class RosControlFollowJointTrajectory(RosController):
             print("[WARNING] RosControllerFollowJointTrajectory: empty relationships")
             return
 
-        stage = self._usd_context.get_stage()
         for relationship in relationships:
             # check for articulation API
             path = relationship.GetPrimPath().pathString            
@@ -605,9 +605,10 @@ class RosControlFollowJointTrajectory(RosController):
                 if name in self._joints:
                     continue    
                 self._joints[name] = {"dof": self._dc.find_articulation_dof(ar, name), "idx": idx, "ar": ar, 
-                                      "lower": lower_limits[idx], "upper": upper_limits[idx], 
+                                      "lower": lower_limits[idx] / get_stage_units(), 
+                                      "upper": upper_limits[idx] / get_stage_units(), 
+                                      "joint": self._dc.find_articulation_joint(ar, name),
                                       "hasLimits": has_limits[idx]}
-
 
 
 
@@ -643,12 +644,6 @@ class RosControlFollowJointTrajectory(RosController):
             if name not in self.__tolerances.keys():
                 self.__tolerances[name] = self.__default_tolerance
 
-        self.__mode = 'velocity'
-        for point in self.__goal.trajectory.points:
-            if to_s(point.time_from_start) != 0:
-                self.__mode = 'time'
-                break
-
         # If a user forget the initial position
         if to_s(self.__goal.trajectory.points[0].time_from_start) != 0:
             initial_point = JointTrajectoryPoint(
@@ -656,12 +651,14 @@ class RosControlFollowJointTrajectory(RosController):
                 time_from_start=Duration().to_msg()
             )
             self.__goal.trajectory.points.insert(0, initial_point)
-
+        
         self._feedback_message = FollowJointTrajectory.Feedback()
         self._feedback_message.joint_names = list(self.__goal.trajectory.joint_names)
-        self._success = False
+
+        self._result = None
         # Accept the trajectory
         print("[INFO] RosControlFollowJointTrajectory: Goal Accepted")
+       
         return GoalResponse.ACCEPT
 
     def __on_cancel(self, goal_handle):
@@ -669,7 +666,7 @@ class RosControlFollowJointTrajectory(RosController):
         if self.__goal is not None:
             self.__goal = None
             self._feedback_message = None
-            self._success = False
+            self._result = None
             print("[INFO] RosControlFollowJointTrajectory: Goal Canceled")
 
             goal_handle.destroy()
@@ -681,10 +678,14 @@ class RosControlFollowJointTrajectory(RosController):
             return
         self._dt = dt
         if self.__goal is not None:
-            try:
-                curr_point = self.__goal.trajectory.points[self.__current_point_index]
-            except IndexError: ## Something went wrong with the client ()
+            if self.__current_point_index >= len(self.__goal.trajectory.points):
+                print("[INFO] RosControlFollowJointTrajectory: Goal Succeeded")
+                self.__goal = None
+                self._goal_handle.succeed()
+                self._result = FollowJointTrajectory.Result()
+                self._result.error_code = self._result.SUCCESSFUL
                 return
+                
             now = self._node.get_clock().now().nanoseconds / 1e9
             prev_point = self.__goal.trajectory.points[self.__current_point_index - 1]
             curr_point = self.__goal.trajectory.points[self.__current_point_index]
@@ -701,15 +702,11 @@ class RosControlFollowJointTrajectory(RosController):
                     self.__set_joint_position(name, target_position)
             else:
                 self.__current_point_index += 1
-                if self.__current_point_index >= len(self.__goal.trajectory.points):
-                    print("[INFO] RosControlFollowJointTrajectory: Goal Succeeded")
-                    self.__goal = None
-                    self._success = True
-                    return
                 time_passed = self._node.get_clock().now().nanoseconds / 1e9 - self.__start_time
                 self._feedback_message.actual.positions = [self.__get_joint_position(name)
                                                     for name in self.__goal.trajectory.joint_names]
                 self._feedback_message.actual.time_from_start = Duration(seconds=time_passed).to_msg()
+                self._goal_handle.publish_feedback(self._feedback_message)
 
 
     def __set_joint_position(self, name, target_position):
@@ -718,7 +715,10 @@ class RosControlFollowJointTrajectory(RosController):
 
         dof_ptr = self._joints[name]["dof"]
         ar = self._joints[name]["ar"]
+
         self._dc.wake_up_articulation(ar)
+        if self._dc.get_joint_type(self._joints[name]["joint"]) == _dynamic_control.JOINT_PRISMATIC:
+            target_position /= get_stage_units()
         self._dc.set_dof_position_target(dof_ptr, target_position)
 
     def __get_joint_position(self, name):
@@ -728,20 +728,16 @@ class RosControlFollowJointTrajectory(RosController):
 
 
     async def __on_update(self, goal_handle):
-        while True: 
-            # Using true instead of _goal as it could change to None in step before this has been called
-            # And if the action is cancelled this function will not be called anymore
-            if self._success:
-                goal_handle.succeed()
+        self._goal_handle = goal_handle
+        while self._result is None: 
+            if self.__goal is None:
                 result = FollowJointTrajectory.Result()
-                result.error_code = result.SUCCESSFUL
-                self._success = False
+                result.error_code = result.PATH_TOLERANCE_VIOLATED
                 return result
 
-            goal_handle.publish_feedback(self._feedback_message)
             time.sleep(self._dt)
+        return self._result
 
     def stop(self):
         self.__goal = None
-        # if action is explicitly stopped, it crashes the extension
         super(RosControlFollowJointTrajectory, self).stop()
