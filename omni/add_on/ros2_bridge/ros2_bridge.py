@@ -540,15 +540,19 @@ class RosControlFollowJointTrajectory(RosController):
         self._dc = _dynamic_control.acquire_dynamic_control_interface()
         self._usd_context = usd_context
         # Config
-        # TODO: Maybe add this as a parameter in the GUI
         self._joints = {}
        
+        # TODO: Maybe add this as a parameter in the GUI
         self.__default_tolerance = 0.05
+
         self.__current_point_index = 1
         self.__start_time = None
         self.__goal = None
         self.__mode = None
         self.__tolerances = {}
+        
+        self._dt = 0.05
+        self._success = False
 
     def start(self):
         self.started = True
@@ -575,7 +579,6 @@ class RosControlFollowJointTrajectory(RosController):
             self.add_joints(ar)
         
 
-        print("[INFO] RosControlFollowJointTrajectory: register action", controller_name + action_namespace)
         self._action_server = ActionServer(
             self._node,
             FollowJointTrajectory,
@@ -584,6 +587,7 @@ class RosControlFollowJointTrajectory(RosController):
             goal_callback=self.__on_goal,
             cancel_callback=self.__on_cancel,
         )        
+        print("[INFO] RosControlFollowJointTrajectory: register action", controller_name + action_namespace)
 
     def add_joints(self, ar):
         num_dofs = self._dc.get_articulation_dof_count(ar)
@@ -626,7 +630,6 @@ class RosControlFollowJointTrajectory(RosController):
         # Reject if joints are already controlled
         if self.__goal is not None:
             print("[ERROR] RosControlFollowJointTrajectory: Cannot accept multiple goals")
-
             return GoalResponse.REJECT
 
         # Store goal data
@@ -653,130 +656,92 @@ class RosControlFollowJointTrajectory(RosController):
                 time_from_start=Duration().to_msg()
             )
             self.__goal.trajectory.points.insert(0, initial_point)
+
+        self._feedback_message = FollowJointTrajectory.Feedback()
+        self._feedback_message.joint_names = list(self.__goal.trajectory.joint_names)
+        self._success = False
         # Accept the trajectory
         print("[INFO] RosControlFollowJointTrajectory: Goal Accepted")
-
         return GoalResponse.ACCEPT
 
     def __on_cancel(self, goal_handle):
         """Handle a trajectory cancel command."""
         if self.__goal is not None:
-            # Stop motors
-            for name in self.__goal.trajectory.joint_names:
-                # joint_id = self.__joints[name]
-                self.__set_joint_position(name,self.__get_joint_position(name))
             self.__goal = None
+            self._feedback_message = None
+            self._success = False
             print("[INFO] RosControlFollowJointTrajectory: Goal Canceled")
 
             goal_handle.destroy()
             return CancelResponse.ACCEPT
         return CancelResponse.REJECT
 
-    def __regulate_velocity_mode(self):
-        curr_point = self.__goal.trajectory.points[self.__current_point_index]
+    def step(self, dt):
+        if not self.started:
+            return
+        self._dt = dt
+        if self.__goal is not None:
+            try:
+                curr_point = self.__goal.trajectory.points[self.__current_point_index]
+            except IndexError: ## Something went wrong with the client ()
+                return
+            now = self._node.get_clock().now().nanoseconds / 1e9
+            prev_point = self.__goal.trajectory.points[self.__current_point_index - 1]
+            curr_point = self.__goal.trajectory.points[self.__current_point_index]
+            time_passed = now - self.__start_time
 
-        for index, name in enumerate(self.__goal.trajectory.joint_names):
-            self.__set_joint_position(name, curr_point.positions[index])
+            if time_passed <= to_s(curr_point.time_from_start):
+                # Linear interpolation
+                ratio = (time_passed - to_s(prev_point.time_from_start)) /\
+                    (to_s(curr_point.time_from_start) - to_s(prev_point.time_from_start))
+                for index, name in enumerate(self.__goal.trajectory.joint_names):
+                    side = -1 if curr_point.positions[index] < prev_point.positions[index] else 1
+                    target_position = prev_point.positions[index] + \
+                        side * ratio * abs(curr_point.positions[index] - prev_point.positions[index])
+                    self.__set_joint_position(name, target_position)
+            else:
+                self.__current_point_index += 1
+                if self.__current_point_index >= len(self.__goal.trajectory.points):
+                    print("[INFO] RosControlFollowJointTrajectory: Goal Succeeded")
+                    self.__goal = None
+                    self._success = True
+                    return
+                time_passed = self._node.get_clock().now().nanoseconds / 1e9 - self.__start_time
+                self._feedback_message.actual.positions = [self.__get_joint_position(name)
+                                                    for name in self.__goal.trajectory.joint_names]
+                self._feedback_message.actual.time_from_start = Duration(seconds=time_passed).to_msg()
 
-        done = RosControlFollowJointTrajectory.__is_within_tolerance(
-            curr_point.positions,
-            [self.__get_joint_position(name) for name in self.__goal.trajectory.joint_names],
-            [self.__tolerances[name] for name in self.__goal.trajectory.joint_names],
-        )
-        if done:
-            self.__current_point_index += 1
-            if self.__current_point_index >= len(self.__goal.trajectory.points):
-                return True
-        return False
-
-    def __regulate_time_mode(self):
-        now = self._node.get_clock().now().nanoseconds / 1e9
-        prev_point = self.__goal.trajectory.points[self.__current_point_index - 1]
-        curr_point = self.__goal.trajectory.points[self.__current_point_index]
-        time_passed = now - self.__start_time
-
-        if time_passed <= to_s(curr_point.time_from_start):
-            # Linear interpolation
-            ratio = (time_passed - to_s(prev_point.time_from_start)) /\
-                (to_s(curr_point.time_from_start) - to_s(prev_point.time_from_start))
-            for index, name in enumerate(self.__goal.trajectory.joint_names):
-                side = -1 if curr_point.positions[index] < prev_point.positions[index] else 1
-                target_position = prev_point.positions[index] + \
-                    side * ratio * abs(curr_point.positions[index] - prev_point.positions[index])
-                self.__set_joint_position(name, target_position)
-        else:
-            self.__current_point_index += 1
-            if self.__current_point_index >= len(self.__goal.trajectory.points):
-                return True
-        return False
 
     def __set_joint_position(self, name, target_position):
         if self._joints[name]["hasLimits"]:
             target_position = min(max(target_position, self._joints[name]["lower"]), self._joints[name]["upper"])
 
-        
-        # dof_ptr = self._joints[name]["dof"]
+        dof_ptr = self._joints[name]["dof"]
         ar = self._joints[name]["ar"]
         self._dc.wake_up_articulation(ar)
-        dof_positions = self._dc.get_articulation_dof_states(ar, _dynamic_control.STATE_ALL)["pos"]
-        dof_positions[self._joints[name]["idx"]] = target_position
-        self._dc.set_articulation_dof_position_targets(ar, dof_positions)
-        # print(dof_positions)
-        # self._dc.set_dof_position_target(dof_ptr, target_position)
+        self._dc.set_dof_position_target(dof_ptr, target_position)
 
     def __get_joint_position(self, name):
-
         # Get state for a specific degree of freedom
         dof_state = self._dc.get_dof_state(self._joints[name]["dof"], _dynamic_control.STATE_POS)
         return dof_state.pos
 
 
     async def __on_update(self, goal_handle):
-        feedback_message = FollowJointTrajectory.Feedback()
-        feedback_message.joint_names = list(self.__goal.trajectory.joint_names)
-        while self.__goal:
-            done = False
-
-            # Regulate
-            if self.__mode == 'time':
-                done = self.__regulate_time_mode()
-            else:
-                done = self.__regulate_velocity_mode()
-
-            # Finalize
-            if done:
-                print("[INFO] RosControlFollowJointTrajectory: Goal Succeeded")
-                self.__goal = None
+        while True: 
+            # Using true instead of _goal as it could change to None in step before this has been called
+            # And if the action is cancelled this function will not be called anymore
+            if self._success:
                 goal_handle.succeed()
                 result = FollowJointTrajectory.Result()
                 result.error_code = result.SUCCESSFUL
+                self._success = False
                 return result
 
-            # Publish state
-            time_passed = self._node.get_clock().now().nanoseconds / 1e9 - self.__start_time
-            feedback_message.actual.positions = [self.__get_joint_position(name)
-                                                 for name in self.__goal.trajectory.joint_names]
-            feedback_message.actual.time_from_start = Duration(seconds=time_passed).to_msg()
-            goal_handle.publish_feedback(feedback_message)
-
-            time.sleep(0.05)
-
-        result = FollowJointTrajectory.Result()
-        result.error_code = result.PATH_TOLERANCE_VIOLATED
-        return result
-
-    @staticmethod
-    def __is_within_tolerance(a_vec, b_vec, tol_vec):
-        """Check if two vectors are equals with a given tolerance."""
-        for a, b, tol in zip(a_vec, b_vec, tol_vec):
-            if abs(a - b) > tol:
-                return False
-        return True
-
+            goal_handle.publish_feedback(self._feedback_message)
+            time.sleep(self._dt)
 
     def stop(self):
+        self.__goal = None
         # if action is explicitly stopped, it crashes the extension
         super(RosControlFollowJointTrajectory, self).stop()
-
-    def step(self, dt):
-        pass
