@@ -292,8 +292,10 @@ class RosAttribute(RosController):
         self._event = threading.Event()
         self._event.set()
 
-        self.__set_attribute_using_asyncio = False
+        self.__event_timeout = carb.settings.get_settings().get("/exts/omni.add_on.ros2_bridge/eventTimeout")
+        self.__set_attribute_using_asyncio = carb.settings.get_settings().get("/exts/omni.add_on.ros2_bridge/setAttributeUsingAsyncio")
         print("[INFO] RosAttribute [asyncio: {}]".format(self.__set_attribute_using_asyncio))
+        print("[INFO] RosAttribute [event timeout: {}]".format(self.__event_timeout))
 
     async def _set_attribute(self, attribute, attribute_value):
         ret = attribute.Set(attribute_value)
@@ -366,9 +368,9 @@ class RosAttribute(RosController):
                                 self._value = attribute_value
 
                                 self._event.clear()
-                                response.success = self._event.wait(2.5)
+                                response.success = self._event.wait(self.__event_timeout)
                                 if not response.success:
-                                    response.message = "The timeout (2.5s) for setting the attribute value has been reached"
+                                    response.message = "The timeout ({} s) for setting the attribute value has been reached".format(self.__event_timeout)
                                 
                     except Exception as e:
                         print("[ERROR] srv {} request for {} ({}: {}): {}".format(self._srv_setter.srv_name, request.path, request.attribute, request.value, e))
@@ -525,7 +527,7 @@ class RosAttribute(RosController):
         pass
 
     def physics_step(self, step):
-        if not self.__set_attribute_using_asyncio:
+        if self.__set_attribute_using_asyncio:
             return
         if self._dci.is_simulating():
             if not self._event.is_set():
