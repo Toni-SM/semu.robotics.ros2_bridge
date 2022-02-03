@@ -30,6 +30,8 @@ name = "omni.add_on.ros2_bridge.tests"
 
 [settings]
 exts."omni.add_on.ros2_bridge".nodeName = "OmniAddOnRos2Bridge"
+exts."omni.add_on.ros2_bridge".eventTimeout = 5.0
+exts."omni.add_on.ros2_bridge".setAttributeUsingAsyncio = false
 
 [[native.library]]
 path = "bin/libadd_on_msgs__python.so"
