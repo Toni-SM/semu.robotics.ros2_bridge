@@ -2,6 +2,7 @@ import json
 import time
 import asyncio
 import threading
+import math
 
 import omni
 import carb
@@ -9,6 +10,7 @@ import omni.kit
 from pxr import Usd, Gf
 from omni.syntheticdata import sensors
 from omni.isaac.dynamic_control import _dynamic_control
+
 
 # try:
 #     import numpy as np
@@ -25,32 +27,42 @@ from omni.isaac.dynamic_control import _dynamic_control
 
 import rclpy
 from rclpy.node import Node
+from trajectory_msgs.msg import JointTrajectoryPoint
+from rclpy.duration import Duration
+from rclpy.action import ActionServer, CancelResponse, GoalResponse
+
+from omni.isaac.core.utils.stage import get_stage_units
 
 import omni.add_on.RosBridgeSchema as ROSSchema
+import omni.add_on.RosControlBridgeSchema as ROSControlSchema
 
 # services
 GetPrims = None
 GetPrimAttributes = None
 GetPrimAttribute = None
 SetPrimAttribute = None
-
+FollowJointTrajectory = None
 
 def acquire_ros2_bridge_interface(plugin_name=None, library_path=None):
-    global GetPrims, GetPrimAttributes, GetPrimAttribute, SetPrimAttribute
+    global GetPrims, GetPrimAttributes, GetPrimAttribute, SetPrimAttribute, FollowJointTrajectory
     
     from add_on_msgs.srv import GetPrims as get_prims_srv
     from add_on_msgs.srv import GetPrimAttributes as get_prim_attributes_srv
     from add_on_msgs.srv import GetPrimAttribute as get_prim_attribute_srv
     from add_on_msgs.srv import SetPrimAttribute as set_prim_attribute_srv
+    from control_msgs.action import FollowJointTrajectory as follow_joint_trajectory
+    import control_msgs
 
     GetPrims = get_prims_srv
     GetPrimAttributes = get_prim_attributes_srv
     GetPrimAttribute = get_prim_attribute_srv
     SetPrimAttribute = set_prim_attribute_srv
-
+    FollowJointTrajectory = follow_joint_trajectory
     rclpy.init()
     bridge = Ros2Bridge()
-    threading.Thread(target=rclpy.spin, args=(bridge,)).start()
+    executor = rclpy.executors.MultiThreadedExecutor()
+    executor.add_node(bridge)
+    threading.Thread(target=executor.spin, ).start()
     return bridge
 
 def release_ros2_bridge_interface(bridge):
@@ -92,6 +104,8 @@ class Ros2Bridge(Node):
                 schemas.append(ROSSchema.RosCompressedCamera(prim))
             elif prim.GetTypeName() == "RosAttribute":
                 schemas.append(ROSSchema.RosAttribute(prim))
+            elif prim.GetTypeName() == "RosControlFollowJointTrajectory":
+                schemas.append(ROSControlSchema.RosControlFollowJointTrajectory(prim))
         return schemas
 
     def _stop_components(self):
@@ -109,7 +123,9 @@ class Ros2Bridge(Node):
                 self._components.append(RosCompressedCamera(self, self._viewport_interface, self._usd_context, schema))
             elif schema.__class__.__name__ == "RosAttribute":
                 self._components.append(RosAttribute(self, self._usd_context, schema, self._dci))
-
+            elif schema.__class__.__name__ == "RosControlFollowJointTrajectory":
+                self._components.append(RosControlFollowJointTrajectory(self, self._usd_context, schema))
+                
     def _on_update_event(self, event):
         if self._timeline.is_playing():
             for component in self._components:
@@ -534,4 +550,236 @@ class RosAttribute(RosController):
                 if self._attribute is not None:
                     ret = self._attribute.Set(self._value)
                 self._event.set()
+
+
+# RosControlFollowJointTrajectory (previously in trajectory_follower.py in webots_ros2)
+#
+# Copyright 2022 Florent AUDONNET
+# Copyright 1996-2021 Cyberbotics Ltd.
+# 
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# 
+# This class has been modified by Florent AUDONNET to add support for Nvidia Isaac.
+
+def to_s(duration):
+    return Duration.from_msg(duration).nanoseconds / 1e9
+
+class RosControlFollowJointTrajectory(RosController):
+    def __init__(self, node, usd_context, schema):
+        super(RosControlFollowJointTrajectory, self).__init__(node, usd_context, schema)
         
+        self._action_server = None
+        self._node = node
+        self._dc = _dynamic_control.acquire_dynamic_control_interface()
+        self._usd_context = usd_context
+        # Config
+        self._joints = {}
+       
+        # TODO: Maybe add this as a parameter in the GUI
+        self.__default_tolerance = 0.05
+
+        self.__current_point_index = 1
+        self.__start_time = None
+        self.__goal = None
+        self.__tolerances = {}
+        
+        self._dt = 0.05
+
+    def start(self):
+        self.started = True
+        print("[INFO] RosControlFollowJointTrajectory: starting", self._schema.__class__.__name__)
+
+        action_namespace = self._schema.GetActionNamespaceAttr().Get()
+        controller_name = self._schema.GetControllerNameAttr().Get()
+
+        relationships = self._schema.GetArticulationPrimRel().GetTargets()
+        if not len(relationships):
+            print("[WARNING] RosControllerFollowJointTrajectory: empty relationships")
+            return
+
+        for relationship in relationships:
+            # check for articulation API
+            path = relationship.GetPrimPath().pathString            
+            # get articulation
+            ar = self._dc.get_articulation(path)
+            if ar == _dynamic_control.INVALID_HANDLE:
+                print("[WARNING] RosControllerFollowJointTrajectory: prim {}: invalid handle".format(path))
+                continue
+            
+            self.add_joints(ar)
+        
+
+        self._action_server = ActionServer(
+            self._node,
+            FollowJointTrajectory,
+            controller_name + action_namespace,
+            execute_callback=self.__on_update,
+            goal_callback=self.__on_goal,
+            cancel_callback=self.__on_cancel,
+        )        
+        print("[INFO] RosControlFollowJointTrajectory: register action", controller_name + action_namespace)
+
+    def add_joints(self, ar):
+        num_dofs = self._dc.get_articulation_dof_count(ar)
+        dof_props = self._dc.get_articulation_dof_properties(ar)
+        if dof_props is None:
+            return
+        has_limits = dof_props["hasLimits"]
+        upper_limits = dof_props["upper"]
+        lower_limits = dof_props["lower"]
+
+        for idx, el in enumerate(range(num_dofs)):
+            dof_ptr = self._dc.get_articulation_dof(ar, el)
+            if dof_ptr != _dynamic_control.DofType.DOF_NONE:
+                name = self._dc.get_dof_name(dof_ptr)
+                if name in self._joints:
+                    continue    
+                self._joints[name] = {"dof": self._dc.find_articulation_dof(ar, name), "idx": idx, "ar": ar, 
+                                      "lower": lower_limits[idx] / get_stage_units(), 
+                                      "upper": upper_limits[idx] / get_stage_units(), 
+                                      "joint": self._dc.find_articulation_joint(ar, name),
+                                      "hasLimits": has_limits[idx]}
+
+
+
+    def __on_goal(self, goal_handle):
+        """Handle a new goal trajectory command."""
+        # Reject if joints don't match
+        for name in goal_handle.trajectory.joint_names:
+            if name not in self._joints.keys():
+                joint_names = ', '.join(goal_handle.trajectory.joint_names)
+                print(f"[ERROR] RosControlFollowJointTrajectory: Received a goal with incorrect joint names: ({joint_names}, {self._joints.keys()})")
+                return GoalResponse.REJECT
+
+        # Reject if infinity or NaN
+        for point in goal_handle.trajectory.points:
+            for position, velocity in zip(point.positions, point.velocities):
+                if math.isinf(position) or math.isnan(position) or math.isinf(velocity) or math.isnan(velocity):
+                    print("[ERROR] RosControlFollowJointTrajectory: Received a goal with infinites or NaNs")
+                    return GoalResponse.REJECT
+
+        # Reject if joints are already controlled
+        if self.__goal is not None:
+            print("[ERROR] RosControlFollowJointTrajectory: Cannot accept multiple goals")
+            return GoalResponse.REJECT
+
+        # Store goal data
+        self.__goal = goal_handle
+        self.__current_point_index = 1
+        self.__start_time = self._node.get_clock().now().nanoseconds / 1e9
+
+        for tolerance in self.__goal.goal_tolerance:
+            self.__tolerances[tolerance.name] = tolerance.position
+        for name in self.__goal.trajectory.joint_names:
+            if name not in self.__tolerances.keys():
+                self.__tolerances[name] = self.__default_tolerance
+
+        # If a user forget the initial position
+        if to_s(self.__goal.trajectory.points[0].time_from_start) != 0:
+            initial_point = JointTrajectoryPoint(
+                positions=[self.__get_joint_position(name) for name in self.__goal.trajectory.joint_names],
+                time_from_start=Duration().to_msg()
+            )
+            self.__goal.trajectory.points.insert(0, initial_point)
+        
+        self._feedback_message = FollowJointTrajectory.Feedback()
+        self._feedback_message.joint_names = list(self.__goal.trajectory.joint_names)
+
+        self._result = None
+        # Accept the trajectory
+        print("[INFO] RosControlFollowJointTrajectory: Goal Accepted")
+       
+        return GoalResponse.ACCEPT
+
+    def __on_cancel(self, goal_handle):
+        """Handle a trajectory cancel command."""
+        if self.__goal is not None:
+            self.__goal = None
+            self._feedback_message = None
+            self._result = None
+            print("[INFO] RosControlFollowJointTrajectory: Goal Canceled")
+
+            goal_handle.destroy()
+            return CancelResponse.ACCEPT
+        return CancelResponse.REJECT
+
+    def step(self, dt):
+        if not self.started:
+            return
+        self._dt = dt
+        if self.__goal is not None:
+            if self.__current_point_index >= len(self.__goal.trajectory.points):
+                print("[INFO] RosControlFollowJointTrajectory: Goal Succeeded")
+                self.__goal = None
+                self._goal_handle.succeed()
+                self._result = FollowJointTrajectory.Result()
+                self._result.error_code = self._result.SUCCESSFUL
+                return
+                
+            now = self._node.get_clock().now().nanoseconds / 1e9
+            prev_point = self.__goal.trajectory.points[self.__current_point_index - 1]
+            curr_point = self.__goal.trajectory.points[self.__current_point_index]
+            time_passed = now - self.__start_time
+
+            if time_passed <= to_s(curr_point.time_from_start):
+                # Linear interpolation
+                ratio = (time_passed - to_s(prev_point.time_from_start)) /\
+                    (to_s(curr_point.time_from_start) - to_s(prev_point.time_from_start))
+                for index, name in enumerate(self.__goal.trajectory.joint_names):
+                    side = -1 if curr_point.positions[index] < prev_point.positions[index] else 1
+                    target_position = prev_point.positions[index] + \
+                        side * ratio * abs(curr_point.positions[index] - prev_point.positions[index])
+                    self.__set_joint_position(name, target_position)
+            else:
+                self.__current_point_index += 1
+                time_passed = self._node.get_clock().now().nanoseconds / 1e9 - self.__start_time
+                self._feedback_message.actual.positions = [self.__get_joint_position(name)
+                                                    for name in self.__goal.trajectory.joint_names]
+                self._feedback_message.actual.time_from_start = Duration(seconds=time_passed).to_msg()
+                self._goal_handle.publish_feedback(self._feedback_message)
+
+
+    def __set_joint_position(self, name, target_position):
+        if self._joints[name]["hasLimits"]:
+            target_position = min(max(target_position, self._joints[name]["lower"]), self._joints[name]["upper"])
+
+        dof_ptr = self._joints[name]["dof"]
+        ar = self._joints[name]["ar"]
+
+        self._dc.wake_up_articulation(ar)
+        if self._dc.get_joint_type(self._joints[name]["joint"]) == _dynamic_control.JOINT_PRISMATIC:
+            target_position /= get_stage_units()
+        self._dc.set_dof_position_target(dof_ptr, target_position)
+
+    def __get_joint_position(self, name):
+        # Get state for a specific degree of freedom
+        dof_state = self._dc.get_dof_state(self._joints[name]["dof"], _dynamic_control.STATE_POS)
+        return dof_state.pos
+
+
+    async def __on_update(self, goal_handle):
+        self._goal_handle = goal_handle
+        while self._result is None: 
+            if self.__goal is None:
+                result = FollowJointTrajectory.Result()
+                result.error_code = result.PATH_TOLERANCE_VIOLATED
+                return result
+
+            time.sleep(self._dt)
+        return self._result
+
+    def stop(self):
+        self.__goal = None
+        super(RosControlFollowJointTrajectory, self).stop()
+
