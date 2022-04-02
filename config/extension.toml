@@ -3,7 +3,7 @@ reloadable = true
 order = 0
 
 [package]
-version = "0.0.1"
+version = "0.1.0"
 category = "Simulation"
 title = "ROS2 Bridge (add-on)"
 description = "ROS2 interfaces used for add-ons"
@@ -18,9 +18,9 @@ icon = "data/icon.png"
 [dependencies]
 "omni.kit.uiapp" = {}
 "omni.isaac.ros2_bridge" = {}
+"omni.isaac.dynamic_control" = {}
 "omni.usd.schema.add_on" = {}
 "omni.add_on.ros_bridge_ui" = {}
-"omni.kit.pip_archive" = {} # pulls in numpy and opencv
 
 [[python.module]]
 name = "omni.add_on.ros2_bridge"
