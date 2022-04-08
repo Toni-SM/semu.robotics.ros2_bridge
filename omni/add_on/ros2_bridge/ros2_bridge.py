@@ -7,7 +7,7 @@ import threading
 import omni
 import carb
 import omni.kit
-from pxr import Usd, Gf
+from pxr import Usd, Gf, PhysxSchema
 from omni.isaac.dynamic_control import _dynamic_control
 from omni.isaac.core.utils.stage import get_stage_units
 
@@ -470,7 +470,14 @@ class RosControlFollowJointTrajectory(RosController):
         relationships = self._schema.GetArticulationPrimRel().GetTargets()
 
         if not len(relationships):
-            print("[WARNING] RosControllerFollowJointTrajectory: empty relationships")
+            print("[WARNING] RosControlFollowJointTrajectory: empty relationships")
+            return
+        
+        # check for articulation API
+        stage = self._usd_context.get_stage()
+        path = relationships[0].GetPrimPath().pathString
+        if not stage.GetPrimAtPath(path).HasAPI(PhysxSchema.PhysxArticulationAPI):
+            print("[WARNING] RosControlFollowJointTrajectory: prim {} doesn't have PhysxArticulationAPI".format(path))
             return
 
         self._action_server = ActionServer(self._node,
@@ -502,7 +509,7 @@ class RosControlFollowJointTrajectory(RosController):
         path = relationships[0].GetPrimPath().pathString
         ar = self._dci.get_articulation(path)
         if ar == _dynamic_control.INVALID_HANDLE:
-            print("[WARNING] RosControllerFollowJointTrajectory: prim {} is not an articulation".format(path))
+            print("[WARNING] RosControlFollowJointTrajectory: prim {} is not an articulation".format(path))
             return
         
         dof_props = self._dci.get_articulation_dof_properties(ar)
@@ -528,7 +535,7 @@ class RosControlFollowJointTrajectory(RosController):
                                       "has_limits": has_limits[index]}
 
         if not self._joints:
-            print("[WARNING] RosControllerFollowJointTrajectory: no joints found")
+            print("[WARNING] RosControlFollowJointTrajectory: no joints found")
             self.started = False
 
     def __on_goal_accepted(self, goal_handle):
