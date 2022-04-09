@@ -29,7 +29,7 @@ SetPrimAttribute = None
 FollowJointTrajectory = None
 
 
-def acquire_ros2_bridge_interface(plugin_name=None, library_path=None):
+def acquire_ros2_bridge_interface(ext_id: str = ""):
     global GetPrims, GetPrimAttributes, GetPrimAttribute, SetPrimAttribute, FollowJointTrajectory
     
     from add_on_msgs.srv import GetPrims as get_prims_srv
@@ -59,10 +59,10 @@ def release_ros2_bridge_interface(bridge):
 
 class Ros2Bridge(Node):
     def __init__(self):
-        node_name = carb.settings.get_settings().get("/exts/omni.add_on.ros2_bridge/nodeName")
-        super().__init__(node_name)
-
         self._components = []
+        self._node_name = carb.settings.get_settings().get("/exts/omni.add_on.ros2_bridge/nodeName")
+        
+        super().__init__(self._node_name)
 
         # omni objects and interfaces
         self._usd_context = omni.usd.get_context()
@@ -92,6 +92,8 @@ class Ros2Bridge(Node):
                 schemas.append(ROSSchema.RosAttribute(prim))
             elif prim.GetTypeName() == "RosControlFollowJointTrajectory":
                 schemas.append(ROSControlSchema.RosControlFollowJointTrajectory(prim))
+            elif prim.GetTypeName() == "RosControlGripperCommand":
+                schemas.append(ROSControlSchema.RosControlGripperCommand(prim))
         return schemas
 
     def _stop_components(self):
@@ -109,6 +111,8 @@ class Ros2Bridge(Node):
                 self._components.append(RosAttribute(self, self._usd_context, schema, self._dci))
             elif schema.__class__.__name__ == "RosControlFollowJointTrajectory":
                 self._components.append(RosControlFollowJointTrajectory(self, self._usd_context, schema, self._dci))
+            elif schema.__class__.__name__ == "RosControlGripperCommand":
+                self._components.append(RosControllerGripperCommand(self._usd_context, schema, self._dci))
                 
     def _on_update_event(self, event):
         if self._timeline.is_playing():
@@ -127,11 +131,11 @@ class Ros2Bridge(Node):
         # reload components
         if event.type == int(omni.timeline.TimelineEventType.PLAY):
             self._reload_components()
-            print("[INFO] Ros2Bridge: components reloaded")
+            print("[Info][omni.add_on.ros2_bridge] RosControlBridge: components reloaded")
         # stop components
         elif event.type == int(omni.timeline.TimelineEventType.STOP) or event.type == int(omni.timeline.TimelineEventType.PAUSE):
             self._stop_components()
-            print("[INFO] Ros2Bridge: components stopped")
+            print("[Info][omni.add_on.ros2_bridge] RosControlBridge: components stopped")
 
     def _on_stage_event(self, event):
         pass
@@ -153,7 +157,7 @@ class RosController():
         raise NotImplementedError
 
     def stop(self):
-        print("[INFO] RosController: stopping", self._schema.__class__.__name__)
+        print("[Info][omni.add_on.ros2_bridge] RosController: stopping {}".format(self._schema.__class__.__name__))
         self.started = False
 
     def update_step(self, dt):
@@ -165,7 +169,7 @@ class RosController():
 
 class RosAttribute(RosController):
     def __init__(self, node, usd_context, schema, dci):
-        super(RosAttribute, self).__init__(node, usd_context, schema)
+        super().__init__(node, usd_context, schema)
 
         self._dci = dci
 
@@ -182,8 +186,8 @@ class RosAttribute(RosController):
 
         self.__event_timeout = carb.settings.get_settings().get("/exts/omni.add_on.ros2_bridge/eventTimeout")
         self.__set_attribute_using_asyncio = carb.settings.get_settings().get("/exts/omni.add_on.ros2_bridge/setAttributeUsingAsyncio")
-        print("[INFO] RosAttribute [asyncio: {}]".format(self.__set_attribute_using_asyncio))
-        print("[INFO] RosAttribute [event timeout: {}]".format(self.__event_timeout))
+        print("[Info][omni.add_on.ros2_bridge] RosAttribute: asyncio: {}".format(self.__set_attribute_using_asyncio))
+        print("[Info][omni.add_on.ros2_bridge] RosAttribute: event timeout: {}".format(self.__event_timeout))
 
     async def _set_attribute(self, attribute, attribute_value):
         ret = attribute.Set(attribute_value)
@@ -261,7 +265,7 @@ class RosAttribute(RosController):
                                     response.message = "The timeout ({} s) for setting the attribute value has been reached".format(self.__event_timeout)
                                 
                     except Exception as e:
-                        print("[ERROR] srv {} request for {} ({}: {}): {}".format(self._srv_setter.srv_name, request.path, request.attribute, request.value, e))
+                        print("[Error][omni.add_on.ros2_bridge] RosAttribute: srv {} request for {} ({}: {}): {}".format(self._srv_setter.resolved_name, request.path, request.attribute, value, e))
                         response.success = False
                         response.message = str(e)
                 else:
@@ -312,8 +316,8 @@ class RosAttribute(RosController):
                         try:
                             response.value = json.dumps(list(attribute.Get()))
                         except Exception as e:
-                            print("[UNKNOW]", type(attribute.Get()))
-                            print("  |-- Please, report a new issue (https://github.com/Toni-SM/omni.add_on.ros_bridge/issues)")
+                            print("[Warning][omni.add_on.ros2_bridge] RosAttribute: Unknow attribute type {}".format(type(attribute.Get())))
+                            print("[Warning][omni.add_on.ros2_bridge]   |-- Please, report a new issue (https://github.com/Toni-SM/omni.add_on.ros2_bridge/issues)")
                             response.success = False
                             response.message = "Unknow type {}".format(type(attribute.Get()))
                     elif response.type in ['AssetPath']:
@@ -322,8 +326,8 @@ class RosAttribute(RosController):
                         try:
                             response.value = json.dumps(attribute.Get())
                         except Exception as e:
-                            print("[UNKNOW]", type(attribute.Get()), attribute.Get())
-                            print("  |-- Please, report a new issue (https://github.com/Toni-SM/omni.add_on.ros_bridge/issues)")
+                            print("[Warning][omni.add_on.ros2_bridge] RosAttribute: Unknow {}: {}".format(type(attribute.Get()), attribute.Get()))
+                            print("[Warning][omni.add_on.ros2_bridge]   |-- Please, report a new issue (https://github.com/Toni-SM/omni.add_on.ros2_bridge/issues)")
                             response.success = False
                             response.message = "Unknow type {}".format(type(attribute.Get()))
                 else:
@@ -373,48 +377,51 @@ class RosAttribute(RosController):
         return response
 
     def start(self):
-        self.started = True
-        print("[INFO] RosAttribute: starting", self._schema.__class__.__name__)
+        print("[Info][omni.add_on.ros2_bridge] RosAttribute: starting {}".format(self._schema.__class__.__name__))
 
         service_name = self._schema.GetPrimsSrvTopicAttr().Get()
         self._srv_prims = self._node.create_service(GetPrims, service_name, self._process_prims_request)
-        print("[INFO] RosAttribute: register srv:", self._srv_prims.srv_name)
+        print("[Info][omni.add_on.ros2_bridge] RosAttribute: register srv: {}".format(self._srv_prims.srv_name))
 
         service_name = self._schema.GetGetAttrSrvTopicAttr().Get()
         self._srv_getter = self._node.create_service(GetPrimAttribute, service_name, self._process_getter_request)
-        print("[INFO] RosAttribute: register srv:", self._srv_getter.srv_name)
+        print("[Info][omni.add_on.ros2_bridge] RosAttribute: register srv: {}".format(self._srv_getter.srv_name))
 
         service_name = self._schema.GetAttributesSrvTopicAttr().Get()
         self._srv_attributes = self._node.create_service(GetPrimAttributes, service_name, self._process_attributes_request)
-        print("[INFO] RosAttribute: register srv:", self._srv_attributes.srv_name)
+        print("[Info][omni.add_on.ros2_bridge] RosAttribute: register srv: {}".format(self._srv_attributes.srv_name))
 
         service_name = self._schema.GetSetAttrSrvTopicAttr().Get()
         self._srv_setter = self._node.create_service(SetPrimAttribute, service_name, self._process_setter_request)
-        print("[INFO] RosAttribute: register srv:", self._srv_setter.srv_name)
+        print("[Info][omni.add_on.ros2_bridge] RosAttribute: register srv: {}".format(self._srv_setter.srv_name))
         
+        self.started = True
+
     def stop(self):
         if self._srv_prims is not None:
-            print("[INFO] RosAttribute: unregister srv:", self._srv_prims.srv_name)
+            print("[Info][omni.add_on.ros2_bridge] RosAttribute: unregister srv: {}".format(self._srv_prims.srv_name))
             self._node.destroy_service(self._srv_prims)
             self._srv_prims = None
         if self._srv_getter is not None:
-            print("[INFO] RosAttribute: unregister srv:", self._srv_getter.srv_name)
+            print("[Info][omni.add_on.ros2_bridge] RosAttribute: unregister srv: {}".format(self._srv_getter.srv_name))
             self._node.destroy_service(self._srv_getter)
             self._srv_getter = None
         if self._srv_attributes is not None:
-            print("[INFO] RosAttribute: unregister srv:", self._srv_attributes.srv_name)
+            print("[Info][omni.add_on.ros2_bridge] RosAttribute: unregister srv: {}".format(self._srv_attributes.srv_name))
             self._node.destroy_service(self._srv_attributes)
             self._srv_attributes = None
         if self._srv_setter is not None:
-            print("[INFO] RosAttribute: unregister srv:", self._srv_setter.srv_name)
+            print("[Info][omni.add_on.ros2_bridge] RosAttribute: unregister srv: {}".format(self._srv_setter.srv_name))
             self._node.destroy_service(self._srv_setter)
             self._srv_setter = None
-        super(RosAttribute, self).stop()
+        super().stop()
 
     def update_step(self, dt):
         pass
 
     def physics_step(self, step):
+        if not self.started:
+            return
         if self.__set_attribute_using_asyncio:
             return
         if self._dci.is_simulating():
@@ -446,59 +453,67 @@ class RosAttribute(RosController):
 
 class RosControlFollowJointTrajectory(RosController):
     def __init__(self, node, usd_context, schema, dci):
-        super(RosControlFollowJointTrajectory, self).__init__(node, usd_context, schema)
+        super().__init__(node, usd_context, schema)
         
         self._dci = dci
 
-        self._dt = 0.05
+        self._articulation = _dynamic_control.INVALID_HANDLE
         self._joints = {}
-        self._action_server = None
-       
-        # TODO: add it to the schema
-        self.__default_tolerance = 0.05
 
-        self.__goal = None
-        self.__start_time = None
-        self.__tolerances = {}
-        self.__current_point_index = 1
+        self._action_server = None
+
+        # TODO: add to schema?
+        self._action_tolerances = {}
+        self._action_default_tolerance = 0.05
+
+        self._action_dt = 0.05
+        self._action_goal_handle = None
+        self._action_start_time = None
+        self._action_point_index = 1
+
+        # feedback / result
+        self._action_result_message = None
+        self._action_feedback_message = FollowJointTrajectory.Feedback()
         
     def start(self):
-        print("[INFO] RosControlFollowJointTrajectory: starting", self._schema.__class__.__name__)
+        print("[Info][omni.add_on.ros2_bridge] RosControlFollowJointTrajectory: starting {}".format(self._schema.__class__.__name__))
         
+        # get attributes and relationships
         action_namespace = self._schema.GetActionNamespaceAttr().Get()
         controller_name = self._schema.GetControllerNameAttr().Get()
-        relationships = self._schema.GetArticulationPrimRel().GetTargets()
 
+        relationships = self._schema.GetArticulationPrimRel().GetTargets()
         if not len(relationships):
-            print("[WARNING] RosControlFollowJointTrajectory: empty relationships")
+            print("[Warning][omni.add_on.ros2_bridge] RosControlFollowJointTrajectory: empty relationships")
             return
         
         # check for articulation API
         stage = self._usd_context.get_stage()
         path = relationships[0].GetPrimPath().pathString
         if not stage.GetPrimAtPath(path).HasAPI(PhysxSchema.PhysxArticulationAPI):
-            print("[WARNING] RosControlFollowJointTrajectory: prim {} doesn't have PhysxArticulationAPI".format(path))
+            print("[Warning][omni.add_on.ros2_bridge] RosControlFollowJointTrajectory: prim {} doesn't have PhysxArticulationAPI".format(path))
             return
 
+        # start action server
         self._action_server = ActionServer(self._node,
                                            FollowJointTrajectory,
                                            controller_name + action_namespace,
-                                           execute_callback=self.__on_update,
-                                           goal_callback=self.__on_goal,
-                                           cancel_callback=self.__on_cancel,
-                                           handle_accepted_callback=self.__on_goal_accepted)
-        print("[INFO] RosControlFollowJointTrajectory: register action:", controller_name + action_namespace)
+                                           execute_callback=self._on_update,
+                                           goal_callback=self._on_goal,
+                                           cancel_callback=self._on_cancel,
+                                           handle_accepted_callback=self._on_goal_accepted)
+        print("[Info][omni.add_on.ros2_bridge] RosControlFollowJointTrajectory: register action {}".format(controller_name + action_namespace))
 
         self.started = True
 
     def stop(self):
-        self.__goal = None
+        super().stop()
+        self._articulation = _dynamic_control.INVALID_HANDLE
         # destroy action server
         if self._action_server is not None:
-            print("[INFO] RosControlFollowJointTrajectory: destroy action server")
-            # self._action_server.destroy()
+            print("[Info][omni.add_on.ros2_bridge] RosControlFollowJointTrajectory: destroy action server: {}".format(self._schema.GetPrim().GetPath()))
             self._action_server = None
-        super(RosControlFollowJointTrajectory, self).stop()
+        self._action_goal_handle = None
 
     def _duration_to_seconds(self, duration):
         return Duration.from_msg(duration).nanoseconds / 1e9
@@ -507,12 +522,12 @@ class RosControlFollowJointTrajectory(RosController):
         # get articulation
         relationships = self._schema.GetArticulationPrimRel().GetTargets()
         path = relationships[0].GetPrimPath().pathString
-        ar = self._dci.get_articulation(path)
-        if ar == _dynamic_control.INVALID_HANDLE:
-            print("[WARNING] RosControlFollowJointTrajectory: prim {} is not an articulation".format(path))
+        self._articulation = self._dci.get_articulation(path)
+        if self._articulation == _dynamic_control.INVALID_HANDLE:
+            print("[Warning][omni.add_on.ros2_bridge] RosControlFollowJointTrajectory: prim {} is not an articulation".format(path))
             return
         
-        dof_props = self._dci.get_articulation_dof_properties(ar)
+        dof_props = self._dci.get_articulation_dof_properties(self._articulation)
         if dof_props is None:
             return
 
@@ -520,79 +535,100 @@ class RosControlFollowJointTrajectory(RosController):
         lower_limits = dof_props["lower"]
         has_limits = dof_props["hasLimits"]
 
-        for index in range(self._dci.get_articulation_dof_count(ar)):
-            dof_ptr = self._dci.get_articulation_dof(ar, index)
+        # get joints
+        for i in range(self._dci.get_articulation_dof_count(self._articulation)):
+            dof_ptr = self._dci.get_articulation_dof(self._articulation, i)
             if dof_ptr != _dynamic_control.DofType.DOF_NONE:
-                name = self._dci.get_dof_name(dof_ptr)
-                if name in self._joints:
-                    continue
-                self._joints[name] = {"ar": ar, 
-                                      "index": index, 
-                                      "dof": self._dci.find_articulation_dof(ar, name), 
-                                      "lower": lower_limits[index] / get_stage_units(), 
-                                      "upper": upper_limits[index] / get_stage_units(), 
-                                      "joint": self._dci.find_articulation_joint(ar, name),
-                                      "has_limits": has_limits[index]}
+                dof_name = self._dci.get_dof_name(dof_ptr)
+                if dof_name not in self._joints:
+                    _joint = self._dci.find_articulation_joint(self._articulation, dof_name)
+                    self._joints[dof_name] = {"joint": _joint,
+                                              "type": self._dci.get_joint_type(_joint),
+                                              "dof": self._dci.find_articulation_dof(self._articulation, dof_name), 
+                                              "lower": lower_limits[i], 
+                                              "upper": upper_limits[i], 
+                                              "has_limits": has_limits[i]}
 
         if not self._joints:
-            print("[WARNING] RosControlFollowJointTrajectory: no joints found")
+            print("[Warning][omni.add_on.ros2_bridge] RosControlFollowJointTrajectory: no joints found in articulation {}".format(path))
             self.started = False
 
-    def __on_goal_accepted(self, goal_handle):
+    def _set_joint_position(self, name, target_position):
+        # clip target position
+        if self._joints[name]["has_limits"]:
+            target_position = min(max(target_position, self._joints[name]["lower"]), self._joints[name]["upper"])
+        # scale target position for prismatic joints
+        if self._joints[name]["type"] == _dynamic_control.JOINT_PRISMATIC:
+            target_position /= get_stage_units()
+        # set target position
+        self._dci.set_dof_position_target(self._joints[name]["dof"], target_position)
+
+    def _get_joint_position(self, name):
+        position = self._dci.get_dof_state(self._joints[name]["dof"], _dynamic_control.STATE_POS).pos
+        if self._joints[name]["type"] == _dynamic_control.JOINT_PRISMATIC:
+            return position * get_stage_units()
+        return position
+
+    def _on_goal_accepted(self, goal_handle):
         goal_handle.execute()
 
-    def __on_goal(self, goal_handle):
-        """Handle a new goal trajectory command."""
+    def _on_goal(self, goal_handle):
         # reject if joints don't match
         for name in goal_handle.trajectory.joint_names:
             if name not in self._joints.keys():
-                print("[ERROR] RosControlFollowJointTrajectory: Received a goal with incorrect joint names ({} not in {})".format(name, list(self._joints.keys())))
+                print("[Warning][omni.add_on.ros2_bridge] RosControlFollowJointTrajectory: received a goal with incorrect joint names ({} not in {})".format(name, list(self._joints.keys())))
                 return GoalResponse.REJECT
 
         # reject if infinity or NaN
         for point in goal_handle.trajectory.points:
             for position, velocity in zip(point.positions, point.velocities):
                 if math.isinf(position) or math.isnan(position) or math.isinf(velocity) or math.isnan(velocity):
-                    print("[ERROR] RosControlFollowJointTrajectory: Received a goal with infinites or NaNs")
+                    print("[Warning][omni.add_on.ros2_bridge] RosControlFollowJointTrajectory: received a goal with infinites or NaNs")
                     return GoalResponse.REJECT
 
         # reject if joints are already controlled
-        if self.__goal is not None:
-            print("[ERROR] RosControlFollowJointTrajectory: Cannot accept multiple goals")
+        if self._action_goal_handle is not None:
+            print("[Warning][omni.add_on.ros2_bridge] RosControlFollowJointTrajectory: cannot accept multiple goals")
             return GoalResponse.REJECT
 
-        # store goal data
-        self.__goal = goal_handle
-        self.__current_point_index = 1
-        self.__start_time = self._node.get_clock().now().nanoseconds / 1e9
-
-        for tolerance in self.__goal.goal_tolerance:
-            self.__tolerances[tolerance.name] = tolerance.position
-        for name in self.__goal.trajectory.joint_names:
-            if name not in self.__tolerances.keys():
-                self.__tolerances[name] = self.__default_tolerance
+        # set tolerances
+        for tolerance in goal_handle.goal_tolerance:
+            self._action_tolerances[tolerance.name] = tolerance.position
+        for name in goal_handle.trajectory.joint_names:
+            if name not in self._action_tolerances:
+                self._action_tolerances[name] = self._action_default_tolerance
 
         # if the user forget the initial position
-        if self._duration_to_seconds(self.__goal.trajectory.points[0].time_from_start) != 0:
-            initial_point = JointTrajectoryPoint(positions=[self.__get_joint_position(name) for name in self.__goal.trajectory.joint_names],
+        if goal_handle.trajectory.points[0].time_from_start:
+            initial_point = JointTrajectoryPoint(positions=[self._get_joint_position(name) for name in goal_handle.trajectory.joint_names],
                                                  time_from_start=Duration().to_msg())
-            self.__goal.trajectory.points.insert(0, initial_point)
+            goal_handle.trajectory.points.insert(0, initial_point)
         
-        self._feedback_message = FollowJointTrajectory.Feedback()
-        self._feedback_message.joint_names = list(self.__goal.trajectory.joint_names)
+        # store goal data
+        self._action_goal_handle = goal_handle
+        self._action_point_index = 1
+        self._action_start_time = self._node.get_clock().now().nanoseconds / 1e9
+        self._action_feedback_message.joint_names = list(goal_handle.trajectory.joint_names)
 
-        self._result = None
+        self._action_result_message = None
         return GoalResponse.ACCEPT
 
-    def __on_cancel(self, goal_handle):
-        """Handle a trajectory cancel command."""
-        if self.__goal is not None:
-            self.__goal = None
-            self._feedback_message = None
-            self._result = None
-            goal_handle.destroy()
-            return CancelResponse.ACCEPT
-        return CancelResponse.REJECT
+    def _on_cancel(self, goal_handle):
+        if self._action_goal_handle is None:
+            return CancelResponse.REJECT
+        self._action_goal_handle = None
+        goal_handle.destroy()
+        return CancelResponse.ACCEPT
+
+    async def _on_update(self, goal_handle):
+        self._action_goal_handle = goal_handle
+        while self._action_result_message is None: 
+            if self._action_goal_handle is None:
+                result = FollowJointTrajectory.Result()
+                result.error_code = result.PATH_TOLERANCE_VIOLATED
+                return result
+            time.sleep(self._action_dt)
+        return self._action_result_message
 
     def update_step(self, dt):
         pass
@@ -605,56 +641,33 @@ class RosControlFollowJointTrajectory(RosController):
             self._init_articulation()
             return
         # update articulation
-        self._dt = dt
-        if self.__goal is not None:
-            if self.__current_point_index >= len(self.__goal.trajectory.points):
-                self.__goal = None
-                self._goal_handle.succeed()
-                self._result = FollowJointTrajectory.Result()
-                self._result.error_code = self._result.SUCCESSFUL
+        self._action_dt = dt
+        if self._action_goal_handle is not None:
+            # end of trajectory
+            if self._action_point_index >= len(self._action_goal_handle.trajectory.points):
+                self._action_goal_handle = None
+                self._action_result_message = FollowJointTrajectory.Result()
+                self._action_result_message.error_code = self._action_result_message.SUCCESSFUL
+                self._action_goal_handle.succeed()
                 return
             
-            now = self._node.get_clock().now().nanoseconds / 1e9
-            prev_point = self.__goal.trajectory.points[self.__current_point_index - 1]
-            curr_point = self.__goal.trajectory.points[self.__current_point_index]
-            time_passed = now - self.__start_time
+            previous_point = self._action_goal_handle.trajectory.points[self._action_point_index - 1]
+            current_point = self._action_goal_handle.trajectory.points[self._action_point_index]
+            time_passed = self._node.get_clock().now().nanoseconds / 1e9 - self._action_start_time
 
-            if time_passed <= self._duration_to_seconds(curr_point.time_from_start):
-                # linear interpolation
-                ratio = (time_passed - self._duration_to_seconds(prev_point.time_from_start)) \
-                      / (self._duration_to_seconds(curr_point.time_from_start) - self._duration_to_seconds(prev_point.time_from_start))
-                for index, name in enumerate(self.__goal.trajectory.joint_names):
-                    side = -1 if curr_point.positions[index] < prev_point.positions[index] else 1
-                    target_position = prev_point.positions[index] + \
-                        side * ratio * abs(curr_point.positions[index] - prev_point.positions[index])
-                    self.__set_joint_position(name, target_position)
+            # set target using linear interpolation
+            if time_passed <= self._duration_to_seconds(current_point.time_from_start):
+                ratio = (time_passed - self._duration_to_seconds(previous_point.time_from_start)) \
+                      / (self._duration_to_seconds(current_point.time_from_start) - self._duration_to_seconds(previous_point.time_from_start))
+                self._dci.wake_up_articulation(self._articulation)
+                for i, name in enumerate(self._action_goal_handle.trajectory.joint_names):
+                    side = -1 if current_point.positions[i] < previous_point.positions[i] else 1
+                    target_position = previous_point.positions[i] \
+                                    + side * ratio * abs(current_point.positions[i] - previous_point.positions[i])
+                    self._set_joint_position(name, target_position)
+            # send feedback
             else:
-                self.__current_point_index += 1
-                time_passed = self._node.get_clock().now().nanoseconds / 1e9 - self.__start_time
-                self._feedback_message.actual.positions = [self.__get_joint_position(name) for name in self.__goal.trajectory.joint_names]
-                self._feedback_message.actual.time_from_start = Duration(seconds=time_passed).to_msg()
-                self._goal_handle.publish_feedback(self._feedback_message)
-
-    def __set_joint_position(self, name, target_position):
-        if self._joints[name]["has_limits"]:
-            target_position = min(max(target_position, self._joints[name]["lower"]), self._joints[name]["upper"])
-
-        self._dci.wake_up_articulation(self._joints[name]["ar"])
-        if self._dci.get_joint_type(self._joints[name]["joint"]) == _dynamic_control.JOINT_PRISMATIC:
-            target_position /= get_stage_units()
-        self._dci.set_dof_position_target(self._joints[name]["dof"], target_position)
-
-    def __get_joint_position(self, name):
-        dof_state = self._dci.get_dof_state(self._joints[name]["dof"], _dynamic_control.STATE_POS)
-        return dof_state.pos
-
-    async def __on_update(self, goal_handle):
-        self._goal_handle = goal_handle
-        while self._result is None: 
-            if self.__goal is None:
-                result = FollowJointTrajectory.Result()
-                result.error_code = result.PATH_TOLERANCE_VIOLATED
-                return result
-
-            time.sleep(self._dt)
-        return self._result
+                self._action_point_index += 1
+                self._action_feedback_message.actual.positions = [self._get_joint_position(name) for name in self._action_goal_handle.trajectory.joint_names]
+                self._action_feedback_message.actual.time_from_start = Duration(seconds=time_passed).to_msg()
+                self._action_goal_handle.publish_feedback(self._action_feedback_message)
