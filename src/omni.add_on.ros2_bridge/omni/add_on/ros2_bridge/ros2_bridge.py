@@ -27,22 +27,25 @@ GetPrimAttributes = None
 GetPrimAttribute = None
 SetPrimAttribute = None
 FollowJointTrajectory = None
+GripperCommand = None
 
 
 def acquire_ros2_bridge_interface(ext_id: str = ""):
-    global GetPrims, GetPrimAttributes, GetPrimAttribute, SetPrimAttribute, FollowJointTrajectory
+    global GetPrims, GetPrimAttributes, GetPrimAttribute, SetPrimAttribute, FollowJointTrajectory, GripperCommand
     
     from add_on_msgs.srv import GetPrims as get_prims_srv
     from add_on_msgs.srv import GetPrimAttributes as get_prim_attributes_srv
     from add_on_msgs.srv import GetPrimAttribute as get_prim_attribute_srv
     from add_on_msgs.srv import SetPrimAttribute as set_prim_attribute_srv
     from control_msgs.action import FollowJointTrajectory as follow_joint_trajectory_action
+    from control_msgs.action import GripperCommand as gripper_command_action
 
     GetPrims = get_prims_srv
     GetPrimAttributes = get_prim_attributes_srv
     GetPrimAttribute = get_prim_attribute_srv
     SetPrimAttribute = set_prim_attribute_srv
     FollowJointTrajectory = follow_joint_trajectory_action
+    GripperCommand = gripper_command_action
 
     rclpy.init()
     bridge = Ros2Bridge()
@@ -645,10 +648,10 @@ class RosControlFollowJointTrajectory(RosController):
         if self._action_goal_handle is not None:
             # end of trajectory
             if self._action_point_index >= len(self._action_goal_handle.trajectory.points):
-                self._action_goal_handle = None
                 self._action_result_message = FollowJointTrajectory.Result()
                 self._action_result_message.error_code = self._action_result_message.SUCCESSFUL
                 self._action_goal_handle.succeed()
+                self._action_goal_handle = None
                 return
             
             previous_point = self._action_goal_handle.trajectory.points[self._action_point_index - 1]
@@ -671,3 +674,203 @@ class RosControlFollowJointTrajectory(RosController):
                 self._action_feedback_message.actual.positions = [self._get_joint_position(name) for name in self._action_goal_handle.trajectory.joint_names]
                 self._action_feedback_message.actual.time_from_start = Duration(seconds=time_passed).to_msg()
                 self._action_goal_handle.publish_feedback(self._action_feedback_message)
+
+
+class RosControllerGripperCommand(RosController):
+    def __init__(self, node, usd_context, schema, dci):
+        super().__init__(node, usd_context, schema)
+        
+        self._dci = dci
+
+        self._articulation = _dynamic_control.INVALID_HANDLE
+        self._joints = {}
+
+        self._action_server = None
+
+        self._action_dt = 0.05
+        self._action_goal_handle = None
+        self._action_start_time = None
+        # TODO: add to schema?
+        self._action_timeout = 5.0
+        self._action_position_threshold = 0.001
+
+        # feedback / result
+        self._action_result_message = None
+        self._action_feedback_message = GripperCommand.Feedback()
+        
+    def start(self):
+        print("[Info][omni.add_on.ros2_bridge] RosControllerGripperCommand: starting {}".format(self._schema.__class__.__name__))
+        
+        # get attributes and relationships
+        action_namespace = self._schema.GetActionNamespaceAttr().Get()
+        controller_name = self._schema.GetControllerNameAttr().Get()
+
+        relationships = self._schema.GetArticulationPrimRel().GetTargets()
+        if not len(relationships):
+            print("[Warning][omni.add_on.ros2_bridge] RosControllerGripperCommand: empty relationships")
+            return
+        elif len(relationships) == 1:
+            print("[Warning][omni.add_on.ros2_bridge] RosControllerGripperCommand: relationship is not a group")
+            return
+        
+        # check for articulation API
+        stage = self._usd_context.get_stage()
+        path = relationships[0].GetPrimPath().pathString
+        if not stage.GetPrimAtPath(path).HasAPI(PhysxSchema.PhysxArticulationAPI):
+            print("[Warning][omni.add_on.ros2_bridge] RosControllerGripperCommand: prim {} doesn't have PhysxArticulationAPI".format(path))
+            return
+
+        # start action server
+        self._action_server = ActionServer(self._node,
+                                           GripperCommand,
+                                           controller_name + action_namespace,
+                                           execute_callback=self._on_update,
+                                           goal_callback=self._on_goal,
+                                           cancel_callback=self._on_cancel,
+                                           handle_accepted_callback=self._on_goal_accepted)
+        print("[Info][omni.add_on.ros2_bridge] RosControllerGripperCommand: register action {}".format(controller_name + action_namespace))
+
+        self.started = True
+
+    def stop(self):
+        super().stop()
+        self._articulation = _dynamic_control.INVALID_HANDLE
+        # destroy action server
+        if self._action_server is not None:
+            print("[Info][omni.add_on.ros2_bridge] RosControllerGripperCommand: destroy action server: {}".format(self._schema.GetPrim().GetPath()))
+            self._action_server = None
+        self._action_goal_handle = None
+
+    def _duration_to_seconds(self, duration):
+        return Duration.from_msg(duration).nanoseconds / 1e9
+
+    def _init_articulation(self):
+        # get articulation
+        relationships = self._schema.GetArticulationPrimRel().GetTargets()
+        path = relationships[0].GetPrimPath().pathString
+        self._articulation = self._dci.get_articulation(path)
+        if self._articulation == _dynamic_control.INVALID_HANDLE:
+            print("[Warning][omni.add_on.ros2_bridge] RosControllerGripperCommand: prim {} is not an articulation".format(path))
+            return
+        
+        dof_props = self._dci.get_articulation_dof_properties(self._articulation)
+        if dof_props is None:
+            return
+
+        upper_limits = dof_props["upper"]
+        lower_limits = dof_props["lower"]
+        has_limits = dof_props["hasLimits"]
+
+        # get joints
+        # TODO: move to another relationship in the schema
+        paths = [relationship.GetPrimPath().pathString for relationship in relationships[1:]]
+
+        for i in range(self._dci.get_articulation_dof_count(self._articulation)):
+            dof_ptr = self._dci.get_articulation_dof(self._articulation, i)
+            if dof_ptr != _dynamic_control.DofType.DOF_NONE:
+                # add only required joints
+                if self._dci.get_dof_path(dof_ptr) in paths:
+                    dof_name = self._dci.get_dof_name(dof_ptr)
+                    if dof_name not in self._joints:
+                        _joint = self._dci.find_articulation_joint(self._articulation, dof_name)
+                        self._joints[dof_name] = {"joint": _joint,
+                                                  "type": self._dci.get_joint_type(_joint),
+                                                  "dof": self._dci.find_articulation_dof(self._articulation, dof_name), 
+                                                  "lower": lower_limits[i], 
+                                                  "upper": upper_limits[i], 
+                                                  "has_limits": has_limits[i]}
+
+        if not self._joints:
+            print("[Warning][omni.add_on.ros2_bridge] RosControllerGripperCommand: no joints found in articulation {}".format(path))
+            self.started = False
+
+    def _set_joint_position(self, name, target_position):
+        # clip target position
+        if self._joints[name]["has_limits"]:
+            target_position = min(max(target_position, self._joints[name]["lower"]), self._joints[name]["upper"])
+        # scale target position for prismatic joints
+        if self._joints[name]["type"] == _dynamic_control.JOINT_PRISMATIC:
+            target_position /= get_stage_units()
+        # set target position
+        self._dci.set_dof_position_target(self._joints[name]["dof"], target_position)
+
+    def _get_joint_position(self, name):
+        position = self._dci.get_dof_state(self._joints[name]["dof"], _dynamic_control.STATE_POS).pos
+        if self._joints[name]["type"] == _dynamic_control.JOINT_PRISMATIC:
+            return position * get_stage_units()
+        return position
+
+    def _on_goal_accepted(self, goal_handle):
+        goal_handle.execute()
+
+    def _on_goal(self, goal_handle):
+        # reject if infinity or NaN
+        if math.isinf(goal_handle.command.position) or math.isnan(goal_handle.command.max_effort):
+            print("[Warning][omni.add_on.ros2_bridge] RosControllerGripperCommand: received a goal with infinites or NaNs")
+            return GoalResponse.REJECT
+
+        # reject if joints are already controlled
+        if self._action_goal_handle is not None:
+            print("[Warning][omni.add_on.ros2_bridge] RosControllerGripperCommand: cannot accept multiple goals")
+            return GoalResponse.REJECT
+        
+        # store goal data
+        self._action_goal_handle = goal_handle
+        self._action_start_time = self._node.get_clock().now().nanoseconds / 1e9
+
+        self._action_result_message = None
+        return GoalResponse.ACCEPT
+
+    def _on_cancel(self, goal_handle):
+        if self._action_goal_handle is None:
+            return CancelResponse.REJECT
+        self._action_goal_handle = None
+        goal_handle.destroy()
+        return CancelResponse.ACCEPT
+
+    async def _on_update(self, goal_handle):
+        self._action_goal_handle = goal_handle
+        while self._action_result_message is None: 
+            if self._action_goal_handle is None:
+                result = GripperCommand.Result()
+                result.error_code = result.PATH_TOLERANCE_VIOLATED
+                return result
+            time.sleep(self._action_dt)
+        return self._action_result_message
+
+    def update_step(self, dt):
+        pass
+
+    def physics_step(self, dt):
+        if not self.started:
+            return
+        # init articulation
+        if not self._joints:
+            self._init_articulation()
+            return
+        # update articulation
+        self._action_dt = dt
+        if self._action_goal_handle is not None:
+            target_position = self._action_goal.command.position
+            # set target
+            self._dci.wake_up_articulation(self._articulation)
+            for name in self._joints:
+                self._set_joint_position(name, target_position)
+            # end (position reached)
+            position_reached = True
+            for name in self._joints:
+                position = self._get_joint_position(name)
+                if abs(position - target_position) > self._action_position_threshold:
+                    position_reached = False
+                    break
+            if position_reached:
+                self._action_result_message = GripperCommand.Result()
+                self._action_goal_handle.succeed()
+                self._action_goal_handle = None
+            # end (timeout)
+            time_passed = self._node.get_clock().now().nanoseconds / 1e9 - self._action_start_time
+            if time_passed >= self._action_timeout:
+                self._action_goal_handle.abort()
+                self._action_goal_handle = None
+            # TODO: send feedback
+            # self._action_goal_handle.publish_feedback(self._action_feedback_message)
