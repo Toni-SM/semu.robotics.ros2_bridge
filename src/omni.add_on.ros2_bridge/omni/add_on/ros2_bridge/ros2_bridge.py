@@ -85,6 +85,7 @@ class Ros2Bridge(Node):
         self._stage_event = None
 
         self._stop_components()
+        self.destroy_node()
         rclpy.shutdown()
 
     def _get_ros_bridge_schemas(self):
@@ -115,7 +116,7 @@ class Ros2Bridge(Node):
             elif schema.__class__.__name__ == "RosControlFollowJointTrajectory":
                 self._components.append(RosControlFollowJointTrajectory(self, self._usd_context, schema, self._dci))
             elif schema.__class__.__name__ == "RosControlGripperCommand":
-                self._components.append(RosControllerGripperCommand(self._usd_context, schema, self._dci))
+                self._components.append(RosControllerGripperCommand(self, self._usd_context, schema, self._dci))
                 
     def _on_update_event(self, event):
         if self._timeline.is_playing():
@@ -470,6 +471,7 @@ class RosControlFollowJointTrajectory(RosController):
         self._action_default_tolerance = 0.05
 
         self._action_dt = 0.05
+        self._action_goal = None
         self._action_goal_handle = None
         self._action_start_time = None
         self._action_point_index = 1
@@ -515,8 +517,10 @@ class RosControlFollowJointTrajectory(RosController):
         # destroy action server
         if self._action_server is not None:
             print("[Info][omni.add_on.ros2_bridge] RosControlFollowJointTrajectory: destroy action server: {}".format(self._schema.GetPrim().GetPath()))
+            # self._action_server.destroy()
             self._action_server = None
         self._action_goal_handle = None
+        self._action_goal = None
 
     def _duration_to_seconds(self, duration):
         return Duration.from_msg(duration).nanoseconds / 1e9
@@ -576,61 +580,66 @@ class RosControlFollowJointTrajectory(RosController):
         goal_handle.execute()
 
     def _on_goal(self, goal_handle):
+        goal = goal_handle
+
         # reject if joints don't match
-        for name in goal_handle.trajectory.joint_names:
+        for name in goal.trajectory.joint_names:
             if name not in self._joints.keys():
                 print("[Warning][omni.add_on.ros2_bridge] RosControlFollowJointTrajectory: received a goal with incorrect joint names ({} not in {})".format(name, list(self._joints.keys())))
                 return GoalResponse.REJECT
 
         # reject if infinity or NaN
-        for point in goal_handle.trajectory.points:
+        for point in goal.trajectory.points:
             for position, velocity in zip(point.positions, point.velocities):
                 if math.isinf(position) or math.isnan(position) or math.isinf(velocity) or math.isnan(velocity):
                     print("[Warning][omni.add_on.ros2_bridge] RosControlFollowJointTrajectory: received a goal with infinites or NaNs")
                     return GoalResponse.REJECT
 
         # reject if joints are already controlled
-        if self._action_goal_handle is not None:
+        if self._action_goal is not None:
             print("[Warning][omni.add_on.ros2_bridge] RosControlFollowJointTrajectory: cannot accept multiple goals")
             return GoalResponse.REJECT
 
         # set tolerances
-        for tolerance in goal_handle.goal_tolerance:
+        for tolerance in goal.goal_tolerance:
             self._action_tolerances[tolerance.name] = tolerance.position
-        for name in goal_handle.trajectory.joint_names:
+        for name in goal.trajectory.joint_names:
             if name not in self._action_tolerances:
                 self._action_tolerances[name] = self._action_default_tolerance
 
         # if the user forget the initial position
-        if goal_handle.trajectory.points[0].time_from_start:
-            initial_point = JointTrajectoryPoint(positions=[self._get_joint_position(name) for name in goal_handle.trajectory.joint_names],
+        if goal.trajectory.points[0].time_from_start:
+            initial_point = JointTrajectoryPoint(positions=[self._get_joint_position(name) for name in goal.trajectory.joint_names],
                                                  time_from_start=Duration().to_msg())
-            goal_handle.trajectory.points.insert(0, initial_point)
+            goal.trajectory.points.insert(0, initial_point)
         
         # store goal data
-        self._action_goal_handle = goal_handle
+        self._action_goal = goal
+        self._action_goal_handle = None
         self._action_point_index = 1
         self._action_start_time = self._node.get_clock().now().nanoseconds / 1e9
-        self._action_feedback_message.joint_names = list(goal_handle.trajectory.joint_names)
+        self._action_feedback_message.joint_names = list(goal.trajectory.joint_names)
 
         self._action_result_message = None
         return GoalResponse.ACCEPT
 
     def _on_cancel(self, goal_handle):
-        if self._action_goal_handle is None:
+        if self._action_goal is None:
             return CancelResponse.REJECT
         self._action_goal_handle = None
+        self._action_goal = None
         goal_handle.destroy()
         return CancelResponse.ACCEPT
 
     async def _on_update(self, goal_handle):
         self._action_goal_handle = goal_handle
         while self._action_result_message is None: 
-            if self._action_goal_handle is None:
+            if self._action_goal is None:
                 result = FollowJointTrajectory.Result()
                 result.error_code = result.PATH_TOLERANCE_VIOLATED
                 return result
             time.sleep(self._action_dt)
+            self._action_goal = None
         return self._action_result_message
 
     def update_step(self, dt):
@@ -645,17 +654,18 @@ class RosControlFollowJointTrajectory(RosController):
             return
         # update articulation
         self._action_dt = dt
-        if self._action_goal_handle is not None:
+        if self._action_goal is not None:
             # end of trajectory
-            if self._action_point_index >= len(self._action_goal_handle.trajectory.points):
+            if self._action_point_index >= len(self._action_goal.trajectory.points):
+                self._action_goal = None
                 self._action_result_message = FollowJointTrajectory.Result()
                 self._action_result_message.error_code = self._action_result_message.SUCCESSFUL
                 self._action_goal_handle.succeed()
                 self._action_goal_handle = None
                 return
             
-            previous_point = self._action_goal_handle.trajectory.points[self._action_point_index - 1]
-            current_point = self._action_goal_handle.trajectory.points[self._action_point_index]
+            previous_point = self._action_goal.trajectory.points[self._action_point_index - 1]
+            current_point = self._action_goal.trajectory.points[self._action_point_index]
             time_passed = self._node.get_clock().now().nanoseconds / 1e9 - self._action_start_time
 
             # set target using linear interpolation
@@ -663,7 +673,7 @@ class RosControlFollowJointTrajectory(RosController):
                 ratio = (time_passed - self._duration_to_seconds(previous_point.time_from_start)) \
                       / (self._duration_to_seconds(current_point.time_from_start) - self._duration_to_seconds(previous_point.time_from_start))
                 self._dci.wake_up_articulation(self._articulation)
-                for i, name in enumerate(self._action_goal_handle.trajectory.joint_names):
+                for i, name in enumerate(self._action_goal.trajectory.joint_names):
                     side = -1 if current_point.positions[i] < previous_point.positions[i] else 1
                     target_position = previous_point.positions[i] \
                                     + side * ratio * abs(current_point.positions[i] - previous_point.positions[i])
@@ -671,7 +681,7 @@ class RosControlFollowJointTrajectory(RosController):
             # send feedback
             else:
                 self._action_point_index += 1
-                self._action_feedback_message.actual.positions = [self._get_joint_position(name) for name in self._action_goal_handle.trajectory.joint_names]
+                self._action_feedback_message.actual.positions = [self._get_joint_position(name) for name in self._action_goal.trajectory.joint_names]
                 self._action_feedback_message.actual.time_from_start = Duration(seconds=time_passed).to_msg()
                 self._action_goal_handle.publish_feedback(self._action_feedback_message)
 
@@ -688,11 +698,13 @@ class RosControllerGripperCommand(RosController):
         self._action_server = None
 
         self._action_dt = 0.05
+        self._action_goal = None
         self._action_goal_handle = None
         self._action_start_time = None
         # TODO: add to schema?
-        self._action_timeout = 5.0
+        self._action_timeout = 10.0
         self._action_position_threshold = 0.001
+        self._action_previous_position_sum = float("inf")
 
         # feedback / result
         self._action_result_message = None
@@ -740,6 +752,7 @@ class RosControllerGripperCommand(RosController):
             print("[Info][omni.add_on.ros2_bridge] RosControllerGripperCommand: destroy action server: {}".format(self._schema.GetPrim().GetPath()))
             self._action_server = None
         self._action_goal_handle = None
+        self._action_goal = None
 
     def _duration_to_seconds(self, duration):
         return Duration.from_msg(duration).nanoseconds / 1e9
@@ -803,39 +816,53 @@ class RosControllerGripperCommand(RosController):
     def _on_goal_accepted(self, goal_handle):
         goal_handle.execute()
 
-    def _on_goal(self, goal_handle):
+    def _on_goal(self, goal):
         # reject if infinity or NaN
-        if math.isinf(goal_handle.command.position) or math.isnan(goal_handle.command.max_effort):
+        if math.isinf(goal.command.position) or math.isnan(goal.command.position):
             print("[Warning][omni.add_on.ros2_bridge] RosControllerGripperCommand: received a goal with infinites or NaNs")
             return GoalResponse.REJECT
 
         # reject if joints are already controlled
-        if self._action_goal_handle is not None:
+        if self._action_goal is not None:
             print("[Warning][omni.add_on.ros2_bridge] RosControllerGripperCommand: cannot accept multiple goals")
             return GoalResponse.REJECT
         
-        # store goal data
-        self._action_goal_handle = goal_handle
-        self._action_start_time = self._node.get_clock().now().nanoseconds / 1e9
-
+        # reset internal data
+        self._action_goal = None
+        self._action_goal_handle = None
+        self._action_start_time = None
         self._action_result_message = None
+        self._action_previous_position_sum = float("inf")
+
         return GoalResponse.ACCEPT
 
     def _on_cancel(self, goal_handle):
-        if self._action_goal_handle is None:
+        if self._action_goal is None:
             return CancelResponse.REJECT
+        # reset internal data
+        self._action_goal = None
         self._action_goal_handle = None
+        self._action_start_time = None
+        self._action_result_message = None
+        self._action_previous_position_sum = float("inf")
         goal_handle.destroy()
         return CancelResponse.ACCEPT
 
     async def _on_update(self, goal_handle):
+        # reset internal data
+        self._action_start_time = self._node.get_clock().now().nanoseconds / 1e9
+        self._action_result_message = None
+        self._action_previous_position_sum = float("inf")
+        # set goal
         self._action_goal_handle = goal_handle
+        self._action_goal = goal_handle.request
+        # wait for the goal to be executed
         while self._action_result_message is None: 
-            if self._action_goal_handle is None:
-                result = GripperCommand.Result()
-                result.error_code = result.PATH_TOLERANCE_VIOLATED
-                return result
+            if self._action_goal is None:
+                return GripperCommand.Result()
             time.sleep(self._action_dt)
+        self._action_goal = None
+        self._action_goal_handle = None
         return self._action_result_message
 
     def update_step(self, dt):
@@ -850,27 +877,48 @@ class RosControllerGripperCommand(RosController):
             return
         # update articulation
         self._action_dt = dt
-        if self._action_goal_handle is not None:
+        if self._action_goal is not None and self._action_goal_handle is not None:
             target_position = self._action_goal.command.position
             # set target
             self._dci.wake_up_articulation(self._articulation)
             for name in self._joints:
                 self._set_joint_position(name, target_position)
             # end (position reached)
+            position = 0
+            current_position_sum = 0
             position_reached = True
             for name in self._joints:
                 position = self._get_joint_position(name)
+                current_position_sum += position
                 if abs(position - target_position) > self._action_position_threshold:
                     position_reached = False
                     break
             if position_reached:
                 self._action_result_message = GripperCommand.Result()
-                self._action_goal_handle.succeed()
-                self._action_goal_handle = None
+                self._action_result_message.position = position
+                self._action_result_message.stalled = False
+                self._action_result_message.reached_goal = True
+                if self._action_goal_handle is not None:
+                    self._action_goal_handle.succeed()
+                    self._action_goal_handle = None
+                return
+            # end (stalled)
+            if abs(current_position_sum - self._action_previous_position_sum) < 1e-6:
+                self._action_result_message = GripperCommand.Result()
+                self._action_result_message.position = position
+                self._action_result_message.stalled = True
+                self._action_result_message.reached_goal = False
+                if self._action_goal_handle is not None:
+                    self._action_goal_handle.succeed()
+                    self._action_goal_handle = None
+                return
+            self._action_previous_position_sum = current_position_sum
             # end (timeout)
             time_passed = self._node.get_clock().now().nanoseconds / 1e9 - self._action_start_time
             if time_passed >= self._action_timeout:
-                self._action_goal_handle.abort()
-                self._action_goal_handle = None
+                self._action_result_message = GripperCommand.Result()
+                if self._action_goal_handle is not None:
+                    self._action_goal_handle.abort()
+                    self._action_goal_handle = None
             # TODO: send feedback
             # self._action_goal_handle.publish_feedback(self._action_feedback_message)
