@@ -11,6 +11,7 @@ mkdir -p $extension_dir/$extension_tree/scripts
 mkdir -p $extension_dir/$extension_tree/tests
 mkdir -p $extension_dir/$extension_tree/packages
 
+cp -r bin $extension_dir
 cp -r config $extension_dir
 cp -r data $extension_dir
 cp -r docs $extension_dir
@@ -24,6 +25,7 @@ cp $extension_tree/tests/test_ros2_bridge.py $extension_dir/$extension_tree/test
 
 # packages folder
 cp -r $extension_tree/packages/add_on_msgs $extension_dir/$extension_tree/packages
+cp -r $extension_tree/packages/control_msgs $extension_dir/$extension_tree/packages
 
 # single files
 cp $extension_tree/__init__.py $extension_dir/$extension_tree/
