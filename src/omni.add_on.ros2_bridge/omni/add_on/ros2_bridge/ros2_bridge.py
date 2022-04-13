@@ -824,7 +824,7 @@ class RosControlFollowJointTrajectory(RosController):
         goal_handle.destroy()
         return CancelResponse.ACCEPT
         
-    async def _on_execute(self, goal_handle: 'rclpy.action.server.ServerGoalHandle') -> 'FollowJointTrajectory.Result':
+    def _on_execute(self, goal_handle: 'rclpy.action.server.ServerGoalHandle') -> 'FollowJointTrajectory.Result':
         """Callback function for processing accepted goals
 
         :param goal_handle: The goal handle
@@ -1133,7 +1133,7 @@ class RosControllerGripperCommand(RosController):
         goal_handle.destroy()
         return CancelResponse.ACCEPT
 
-    async def _on_execute(self, goal_handle: 'rclpy.action.server.ServerGoalHandle') -> 'GripperCommand.Result':
+    def _on_execute(self, goal_handle: 'rclpy.action.server.ServerGoalHandle') -> 'GripperCommand.Result':
         """Callback function for processing accepted goals
 
         :param goal_handle: The goal handle
