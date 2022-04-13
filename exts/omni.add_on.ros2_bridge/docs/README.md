@@ -1,7 +1,6 @@
 # omni.add_on.ros2_bridge
 
-This extension allows publishing additional topics and enabling services for agile development of robotic application prototypes in ROS2
+This extension enables the ROS2 action server interfaces for controlling robots (particularly those used by MoveIt to talk to robot controllers: FollowJointTrajectory and GripperCommand) and enables services for agile prototyping of robotic applications in ROS2
 
 Visit https://github.com/Toni-SM/omni.add_on.ros2_bridge to read more about its use
-
 
