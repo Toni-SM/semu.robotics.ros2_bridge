@@ -8,12 +8,17 @@
 
 **Supported OS:** Linux
 
+**Changelog:** [CHANGELOG.md](src/omni.add_on.ros2_bridge/docs/CHANGELOG.md)
+
 **Table of Contents:**
 
 - [Prerequisites](#prerequisites)
 - [Extension setup](#setup)
 - [Extension usage](#usage)
 - [Supported components](#components)
+    - [Attribute](#ros-attribute)
+    - [FollowJointTrajectory](#ros-follow-joint-trajectory)
+    - [GripperCommand](#ros-gripper-command)
 
 <br>
 <hr>
@@ -69,6 +74,7 @@ Disabling the extension shutdowns the ROS node and its respective active communi
 
 The following components are supported:
 
+<a name="ros-attribute"></a>
 * **Attribute (ROS2 service):** enables the ervices for getting and setting the attributes of a prim according to the service definitions described bellow 
 
     The ROS2 package [add_on_msgs](https://github.com/Toni-SM/omni.add_on.ros2_bridge/releases) contains the definition of the messages (download and add it to a ROS2 workspace). A sample code of a [python client application](https://github.com/Toni-SM/omni.add_on.ros2_bridge/releases) is also provided
@@ -121,21 +127,23 @@ The following components are supported:
         string message          # informational, e.g. for error messages
         ```
 
+<a name="ros-follow-joint-trajectory"></a>
 * **FollowJointTrajectory (ROS2 action):** enables the actions for a robot to follow a given trajectory
 
-    To add a FollowJointTrajectory action go to the `Create > Isaac > ROS Control` menu and select `Follow Joint Trajectory` 
+    To add a FollowJointTrajectory action go to the ***Create > Isaac > ROS Control*** menu and select ***Follow Joint Trajectory*** 
 
-    Select, by clicking the `Add Target(s)` button under the `articulationPrim` field, the root of the robot's articulation tree to control and edit the fields that define the namespace of the communication. The communication will take place in the namespace defined by the following fields:
+    Select, by clicking the **Add Target(s)** button under the `articulationPrim` field, the root of the robot's articulation tree to control and edit the fields that define the namespace of the communication. The communication will take place in the namespace defined by the following fields:
 
     ```
     controllerName + actionNamespace
     ```
 
+<a name="ros-gripper-command"></a>
 * **GripperCommand (ROS2 action):** enables the actions to control a gripper
 
-    To add a GripperCommand action go to the `Create > Isaac > ROS Control` menu and select `Gripper Command` 
+    To add a GripperCommand action go to the ***Create > Isaac > ROS Control*** menu and select ***Gripper Command*** 
 
-    Select, by clicking the `Add Target(s)` button under the `articulationPrim` field, the root of the robot's articulation tree to which the end-effector belongs and then add the joints (of the gripper) to control
+    Select, by clicking the **Add Target(s)** button under the `articulationPrim` field, the root of the robot's articulation tree to which the end-effector belongs and then add the joints (of the gripper) to control
     
     Also, edit the fields that define the namespace of the communication. The communication will take place in the namespace defined by the following fields:
 
