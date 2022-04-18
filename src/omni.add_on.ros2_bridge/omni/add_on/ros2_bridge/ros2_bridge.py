@@ -314,12 +314,17 @@ class RosAttribute(RosController):
                     # attribute
                     attribute = prim.GetAttribute(request.attribute)
                     attribute_type = type(attribute.Get()).__name__
+                    # value
                     try:
-                        # value
                         value = json.loads(request.value)
                         attribute_value = None
-
-                        # parse data
+                    except json.JSONDecodeError:
+                        print("[Error][omni.add_on.ros2_bridge] RosAttribute: invalid value: {}".format(request.value))
+                        response.success = False
+                        response.message = "Invalid value '{}'".format(request.value)
+                        return response
+                    # parse data
+                    try:
                         if attribute_type in ['Vec2d', 'Vec2f', 'Vec2h', 'Vec2i']:
                             attribute_value = type(attribute.Get())(value)
                         elif attribute_type in ['Vec3d', 'Vec3f', 'Vec3h', 'Vec3i']:
@@ -900,6 +905,7 @@ class RosControlFollowJointTrajectory(RosController):
             # send feedback
             else:
                 self._action_point_index += 1
+                self._action_feedback_message.joint_names = list(self._action_goal.trajectory.joint_names)
                 self._action_feedback_message.actual.positions = [self._get_joint_position(name) \
                     for name in self._action_goal.trajectory.joint_names]
                 self._action_feedback_message.actual.time_from_start = Duration(seconds=time_passed).to_msg()
