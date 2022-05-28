@@ -17,12 +17,12 @@ if not os.path.exists(python_library_dir):
 
 ext_modules = [
     Extension("_ros2_bridge",
-              [os.path.join("omni", "add_on", "ros2_bridge", "ros2_bridge.py")],
+              [os.path.join("semu", "robotics", "ros2_bridge", "ros2_bridge.py")],
               library_dirs=[python_library_dir]),
 ]
 
 setup(
-    name = 'omni.add_on.ros2_bridge',
+    name = 'semu.robotics.ros2_bridge',
     cmdclass = {'build_ext': build_ext},
     ext_modules = ext_modules
 )

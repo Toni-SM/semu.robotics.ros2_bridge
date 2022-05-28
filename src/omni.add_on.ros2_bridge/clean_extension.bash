@@ -3,5 +3,5 @@
 # delete old files
 rm -r build
 rm *.so
-rm omni/add_on/ros2_bridge/*.c
-rm omni/add_on/ros2_bridge/*.so
+rm semu/robotics/ros2_bridge/*.c
+rm semu/robotics/ros2_bridge/*.so
